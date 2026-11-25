@@ -1,0 +1,6 @@
+{
+  "name": "BicaraKu - AAC Komunikasi Autis",
+  "description": "Aplikasi AAC (Augmentative and Alternative Communication) ramah sensorik untuk individu autis non-verbal",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
