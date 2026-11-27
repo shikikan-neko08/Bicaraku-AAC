@@ -41,8 +41,8 @@ export const EmergencyBar: React.FC<EmergencyBarProps> = ({
       className="bg-rose-50/80 dark:bg-rose-950/30 border-b border-rose-200 dark:border-rose-900/70 px-4 sm:px-6 py-2.5"
     >
       <div className="max-w-7xl mx-auto flex items-center gap-3 overflow-x-auto no-scrollbar">
-        <div className="flex items-center gap-1.5 shrink-0 font-bold text-rose-800 dark:text-rose-200 text-xs sm:text-sm pr-1">
-          <AlertCircle className="w-4 h-4 text-rose-600 dark:text-rose-400 shrink-0" />
+        <div className="flex items-center gap-1.5 shrink-0 font-bold text-rose-800 dark:text-rose-200 text-sm sm:text-base pr-1">
+          <AlertCircle className="w-4 h-4 sm:w-5 sm:h-5 text-rose-600 dark:text-rose-400 shrink-0" />
           <span className="whitespace-nowrap">Darurat:</span>
         </div>
 
@@ -55,17 +55,17 @@ export const EmergencyBar: React.FC<EmergencyBarProps> = ({
               <button
                 key={sym.id}
                 onClick={() => onSelectEmergency(sym)}
-                className="px-3.5 py-2 bg-rose-700 hover:bg-rose-800 active:scale-[0.97] text-white font-bold rounded-xl shadow-sm flex items-center gap-2 shrink-0 text-sm whitespace-nowrap border border-rose-800 dark:border-rose-600 transition-all min-h-[46px]"
+                className="px-4 py-2.5 bg-rose-700 hover:bg-rose-800 active:scale-[0.97] text-white font-extrabold rounded-xl shadow-sm flex items-center gap-2.5 shrink-0 text-base sm:text-lg whitespace-nowrap border border-rose-800 dark:border-rose-600 transition-all min-h-[50px]"
                 style={{ touchAction: 'manipulation' }}
               >
                 {matchedImageUrl ? (
                   <img
                     src={matchedImageUrl}
                     alt={sym.label}
-                    className="w-6 h-6 object-contain rounded bg-white/95 p-0.5 shrink-0"
+                    className="w-7 h-7 object-contain rounded bg-white/95 p-0.5 shrink-0"
                   />
                 ) : (
-                  <Icon className="w-4 h-4 shrink-0" />
+                  <Icon className="w-5 h-5 shrink-0" />
                 )}
                 <span>{sym.label}</span>
               </button>

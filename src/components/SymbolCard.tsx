@@ -65,29 +65,34 @@ export const SymbolCard: React.FC<SymbolCardProps> = ({
 
   const sizeConfig = {
     2: {
-      cardMinH: 'min-h-[140px] sm:min-h-[172px]',
+      cardMinH: 'min-h-[152px] sm:min-h-[184px]',
       imgSize: 'w-20 h-20 sm:w-24 sm:h-24',
-      textSize: 'text-lg sm:text-xl',
+      textSize: 'text-xl sm:text-2xl',
+      fallbackTextSize: 'text-2xl sm:text-3xl',
     },
     3: {
-      cardMinH: 'min-h-[108px] sm:min-h-[132px]',
+      cardMinH: 'min-h-[120px] sm:min-h-[144px]',
       imgSize: 'w-16 h-16 sm:w-20 sm:h-20',
-      textSize: 'text-base sm:text-lg',
+      textSize: 'text-lg sm:text-xl',
+      fallbackTextSize: 'text-xl sm:text-2xl',
     },
     4: {
-      cardMinH: 'min-h-[96px] sm:min-h-[116px]',
+      cardMinH: 'min-h-[104px] sm:min-h-[124px]',
       imgSize: 'w-14 h-14 sm:w-16 sm:h-16',
-      textSize: 'text-sm sm:text-base',
+      textSize: 'text-base sm:text-lg',
+      fallbackTextSize: 'text-lg sm:text-xl',
     },
     5: {
-      cardMinH: 'min-h-[84px] sm:min-h-[100px]',
+      cardMinH: 'min-h-[92px] sm:min-h-[108px]',
       imgSize: 'w-12 h-12 sm:w-14 sm:h-14',
-      textSize: 'text-xs sm:text-sm',
+      textSize: 'text-sm sm:text-base',
+      fallbackTextSize: 'text-base sm:text-lg',
     },
   }[gridSize] || {
-    cardMinH: 'min-h-[108px] sm:min-h-[132px]',
+    cardMinH: 'min-h-[120px] sm:min-h-[144px]',
     imgSize: 'w-16 h-16 sm:w-20 sm:h-20',
-    textSize: 'text-base sm:text-lg',
+    textSize: 'text-lg sm:text-xl',
+    fallbackTextSize: 'text-xl sm:text-2xl',
   };
 
   const renderVisual = () => {
@@ -163,7 +168,7 @@ export const SymbolCard: React.FC<SymbolCardProps> = ({
         onMouseUp={clearDelayTimer}
         onMouseLeave={clearDelayTimer}
         className={`w-full ${sizeConfig.cardMinH} px-3 ${
-          isPlaceholderCard && onAddPhoto ? 'pt-3.5 pb-11' : 'py-3.5'
+          isPlaceholderCard && onAddPhoto ? 'pt-3.5 pb-12' : 'py-3.5'
         } flex flex-col items-center justify-center gap-2 rounded-2xl border-2 transition-transform duration-150 shadow-xs active:scale-[0.97] select-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-600 ${cardStyleClass}`}
         style={{ touchAction: 'manipulation' }}
       >
@@ -171,9 +176,9 @@ export const SymbolCard: React.FC<SymbolCardProps> = ({
 
         {(!imageOnly || isPlaceholderCard || isTextFallbackCard || !visualNode) && (
           <span
-            className={`font-bold ${
+            className={`font-extrabold tracking-tight ${
               isPlaceholderCard || isTextFallbackCard
-                ? 'text-base sm:text-xl'
+                ? sizeConfig.fallbackTextSize
                 : sizeConfig.textSize
             } text-center leading-snug line-clamp-2`}
           >
@@ -200,7 +205,7 @@ export const SymbolCard: React.FC<SymbolCardProps> = ({
           }}
           title="Varian lain"
           aria-label={`Pilih varian lain untuk ${symbol.label}`}
-          className="absolute top-1.5 right-1.5 min-w-[32px] min-h-[32px] px-2 py-1 rounded-lg bg-white/90 dark:bg-slate-900/90 border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-200 hover:bg-white dark:hover:bg-slate-800 shadow-xs flex items-center gap-1 text-[11px] font-semibold"
+          className="absolute top-1.5 right-1.5 min-w-[34px] min-h-[34px] px-2.5 py-1 rounded-lg bg-white/90 dark:bg-slate-900/90 border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-200 hover:bg-white dark:hover:bg-slate-800 shadow-xs flex items-center gap-1 text-xs font-semibold"
           style={{ touchAction: 'manipulation' }}
         >
           <Layers className="w-3.5 h-3.5 shrink-0" />
@@ -215,10 +220,10 @@ export const SymbolCard: React.FC<SymbolCardProps> = ({
             e.stopPropagation();
             onAddPhoto(symbol);
           }}
-          className="absolute inset-x-2 bottom-2 min-h-[30px] px-2.5 py-1 rounded-xl bg-white/95 dark:bg-slate-900/95 border border-slate-300 dark:border-slate-600 text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 text-xs font-semibold flex items-center justify-center gap-1.5 shadow-xs"
+          className="absolute inset-x-2 bottom-2 min-h-[34px] px-2.5 py-1 rounded-xl bg-white/95 dark:bg-slate-900/95 border border-slate-300 dark:border-slate-600 text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 text-xs sm:text-sm font-semibold flex items-center justify-center gap-1.5 shadow-xs"
           style={{ touchAction: 'manipulation' }}
         >
-          <Camera className="w-3.5 h-3.5 shrink-0" />
+          <Camera className="w-4 h-4 shrink-0" />
           <span>Tambah foto</span>
         </button>
       )}

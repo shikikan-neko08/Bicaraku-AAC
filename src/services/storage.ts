@@ -1,11 +1,74 @@
-import { SymbolItem, AACProfile, UsageLog, AdaptiveSuggestion } from '../types';
+import {
+  SymbolItem,
+  AACProfile,
+  UsageLog,
+  AdaptiveSuggestion,
+  CustomBoardCategory,
+  FitzgeraldCategory,
+  FitzgeraldColorKey,
+} from '../types';
 import { idbGetAllSymbols, idbPutSymbol } from './indexedDb';
 
 const STORAGE_KEYS = {
   PROFILE: 'bicara_ku_profile_v1',
   LOGS: 'bicara_ku_logs_v1',
   CONSENT: 'bicara_ku_consent_v1',
+  CATEGORIES: 'bicara_ku_custom_categories_v1',
 };
+
+export const PRESET_BOARD_CATEGORIES: CustomBoardCategory[] = [
+  { id: 'cat-keluarga', name: 'Anggota Keluarga', colorKey: 'yellow' },
+  { id: 'cat-buah', name: 'Buah', colorKey: 'orange' },
+  { id: 'cat-sayur', name: 'Sayuran', colorKey: 'orange' },
+  { id: 'cat-minuman', name: 'Minuman', colorKey: 'orange' },
+  { id: 'cat-hewan', name: 'Hewan', colorKey: 'orange' },
+  { id: 'cat-mainan', name: 'Mainan & Hobi', colorKey: 'green' },
+  { id: 'cat-pakaian', name: 'Pakaian', colorKey: 'orange' },
+  { id: 'cat-transportasi', name: 'Transportasi', colorKey: 'blue' },
+];
+
+export function inferFitzgeraldCategory(
+  boardCategoryName: string,
+  colorKey?: FitzgeraldColorKey
+): FitzgeraldCategory {
+  const lower = boardCategoryName.toLowerCase();
+  if (lower.includes('darurat')) return 'emergency';
+  if (lower.includes('keluarga') || lower.includes('orang') || lower.includes('ganti')) return 'people';
+  if (lower.includes('kerja') || lower.includes('tindakan')) return 'verbs';
+  if (lower.includes('aktivitas') || lower.includes('mainan') || lower.includes('hobi')) return 'activities';
+  if (lower.includes('tempat') || lower.includes('sekolah') || lower.includes('rumah')) return 'places';
+  if (lower.includes('perasaan') || lower.includes('emosi')) return 'feelings';
+  if (lower.includes('sifat') || lower.includes('pertanyaan')) return 'adjectives';
+  if (lower.includes('sosial') || lower.includes('komunikasi')) return 'social';
+  if (lower.includes('kebutuhan') || lower.includes('medis')) return 'needs';
+
+  if (colorKey === 'yellow') return 'people';
+  if (colorKey === 'green') return 'verbs';
+  if (colorKey === 'pink') return 'social';
+  if (colorKey === 'blue') return 'adjectives';
+  if (colorKey === 'white') return 'needs';
+  return 'nouns';
+}
+
+export function getStoredCustomCategories(): CustomBoardCategory[] {
+  try {
+    const stored = localStorage.getItem(STORAGE_KEYS.CATEGORIES);
+    if (!stored) return [];
+    const parsed = JSON.parse(stored);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch (e) {
+    console.error('Error loading custom categories:', e);
+    return [];
+  }
+}
+
+export function saveCustomCategories(categories: CustomBoardCategory[]): void {
+  try {
+    localStorage.setItem(STORAGE_KEYS.CATEGORIES, JSON.stringify(categories));
+  } catch (e) {
+    console.error('Error saving custom categories:', e);
+  }
+}
 
 export const DEFAULT_PROFILE: AACProfile = {
   userName: 'Ananda',

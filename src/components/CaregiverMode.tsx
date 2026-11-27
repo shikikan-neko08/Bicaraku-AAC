@@ -12,9 +12,12 @@ import {
   SymbolUpdateDiffItem,
   SyncSummary,
   SyncDiagnostics,
+  CustomBoardCategory,
+  FitzgeraldColorKey,
 } from '../types';
 import { MANIFEST_URL, BUNDLED_SYMBOLS_VERSION } from '../config/symbolSource';
-import { CATEGORY_LABELS } from '../data/defaultSymbols';
+import { CATEGORY_LABELS, FITZGERALD_COLOR_STYLES } from '../data/defaultSymbols';
+import { PRESET_BOARD_CATEGORIES, inferFitzgeraldCategory } from '../services/storage';
 import { getAvailableVoices } from '../services/tts';
 import { encryptPin, decryptPin, EncryptedPinPayload } from '../services/crypto';
 import { sanitizeSvgText, MAX_SYMBOL_FILE_BYTES } from '../services/svgSanitizer';
@@ -53,6 +56,9 @@ import {
   AlertCircle,
   Activity,
   RotateCcw,
+  Tag,
+  CheckSquare,
+  Square,
 } from 'lucide-react';
 
 interface CaregiverModeProps {
@@ -66,6 +72,8 @@ interface CaregiverModeProps {
   onResetBundledSymbols: (keepCaregiverSymbols: boolean) => Promise<void> | void;
   profile: AACProfile;
   onSaveProfile: (profile: AACProfile) => void;
+  customCategories: CustomBoardCategory[];
+  onSaveCustomCategories: (categories: CustomBoardCategory[]) => void;
   logs: UsageLog[];
   onClose: () => void;
   suggestions: AdaptiveSuggestion[];
@@ -143,6 +151,8 @@ export const CaregiverMode: React.FC<CaregiverModeProps> = ({
   onResetBundledSymbols,
   profile,
   onSaveProfile,
+  customCategories,
+  onSaveCustomCategories,
   logs,
   onClose,
   suggestions,
@@ -152,7 +162,7 @@ export const CaregiverMode: React.FC<CaregiverModeProps> = ({
   onClearInitialEditSymbol,
 }) => {
   const [activeTab, setActiveTab] = useState<
-    'symbols' | 'updates' | 'diagnostics' | 'profile' | 'licenses' | 'suggestions' | 'analytics' | 'backup'
+    'symbols' | 'categories' | 'updates' | 'diagnostics' | 'profile' | 'licenses' | 'suggestions' | 'analytics' | 'backup'
   >('symbols');
   const [editingSymbol, setEditingSymbol] = useState<SymbolItem | null>(null);
   const [isAddingNew, setIsAddingNew] = useState(false);
@@ -167,10 +177,24 @@ export const CaregiverMode: React.FC<CaregiverModeProps> = ({
   const [formLabel, setFormLabel] = useState('');
   const [formSpokenText, setFormSpokenText] = useState('');
   const [formCategory, setFormCategory] = useState<FitzgeraldCategory>('nouns');
+  const [formBoardCategory, setFormBoardCategory] = useState('Benda');
+  const [formCustomCategoryInput, setFormCustomCategoryInput] = useState('');
+  const [formFitzgeraldColor, setFormFitzgeraldColor] = useState<FitzgeraldColorKey>('orange');
   const [formIconName, setFormIconName] = useState('Star');
   const [formCustomImagePreview, setFormCustomImagePreview] = useState<string | undefined>(undefined);
   const [pendingPhotoBlob, setPendingPhotoBlob] = useState<Blob | null>(null);
   const [photoUploadError, setPhotoUploadError] = useState<string | null>(null);
+
+  // Category manager state
+  const [newCategoryName, setNewCategoryName] = useState('');
+  const [newCategoryColor, setNewCategoryColor] = useState<FitzgeraldColorKey>('yellow');
+  const [catManagerSearch, setCatManagerSearch] = useState('');
+  const [catManagerFilter, setCatManagerFilter] = useState<string>('all');
+  const [selectedSymbolIds, setSelectedSymbolIds] = useState<string[]>([]);
+  const [bulkTargetCategory, setBulkTargetCategory] = useState<string>('');
+  const [editingCatId, setEditingCatId] = useState<string | null>(null);
+  const [editingCatName, setEditingCatName] = useState('');
+  const [editingCatColor, setEditingCatColor] = useState<FitzgeraldColorKey>('orange');
 
   // Quick photo upload target (untuk kartu "Perlu foto/simbol")
   const quickPhotoInputRef = useRef<HTMLInputElement>(null);
@@ -251,6 +275,9 @@ export const CaregiverMode: React.FC<CaregiverModeProps> = ({
     setFormLabel('');
     setFormSpokenText('');
     setFormCategory('nouns');
+    setFormBoardCategory(customCategories[0]?.name || 'Benda');
+    setFormCustomCategoryInput('');
+    setFormFitzgeraldColor(customCategories[0]?.colorKey || 'orange');
     setFormIconName('Star');
     setFormCustomImagePreview(undefined);
     setPendingPhotoBlob(null);
@@ -259,15 +286,39 @@ export const CaregiverMode: React.FC<CaregiverModeProps> = ({
   };
 
   const handleOpenEdit = (sym: SymbolItem) => {
+    const currentFolder = sym.boardCategory?.trim() || CATEGORY_LABELS[sym.category]?.label || 'Benda';
+    const currentColor = (sym.fitzgeraldColor?.toLowerCase() as FitzgeraldColorKey) || 'orange';
     setEditingSymbol(sym);
     setFormLabel(sym.label);
     setFormSpokenText(sym.spokenText || sym.speechText || sym.label);
     setFormCategory(sym.category);
+    setFormBoardCategory(currentFolder);
+    setFormCustomCategoryInput('');
+    setFormFitzgeraldColor(
+      FITZGERALD_COLOR_STYLES[currentColor] ? currentColor : 'orange'
+    );
     setFormIconName(sym.iconName);
     setFormCustomImagePreview(blobUrls[sym.id] || sym.customImageUrl);
     setPendingPhotoBlob(null);
     setPhotoUploadError(null);
     setIsAddingNew(true);
+  };
+
+  const ensureCategoryRegistered = (categoryName: string, colorKey: FitzgeraldColorKey) => {
+    const trimmed = categoryName.trim();
+    if (!trimmed) return;
+    const existsInCustom = customCategories.some(
+      c => c.name.trim().toLowerCase() === trimmed.toLowerCase()
+    );
+    const existsInSymbols = symbols.some(
+      s => (s.boardCategory?.trim() || CATEGORY_LABELS[s.category]?.label || '').toLowerCase() === trimmed.toLowerCase()
+    );
+    if (!existsInCustom && !existsInSymbols) {
+      onSaveCustomCategories([
+        ...customCategories,
+        { id: 'cat-' + Date.now(), name: trimmed, colorKey },
+      ]);
+    }
   };
 
   const handleSaveSymbolSubmit = async (e: React.FormEvent) => {
@@ -276,19 +327,26 @@ export const CaregiverMode: React.FC<CaregiverModeProps> = ({
 
     const cleanLabel = formLabel.trim();
     const cleanSpoken = formSpokenText.trim() || cleanLabel;
+    const resolvedBoardCategory =
+      formBoardCategory === '__custom__'
+        ? formCustomCategoryInput.trim() || CATEGORY_LABELS[formCategory]?.label || 'Lainnya'
+        : formBoardCategory.trim() || CATEGORY_LABELS[formCategory]?.label || 'Lainnya';
+
+    if (formBoardCategory === '__custom__' && formCustomCategoryInput.trim()) {
+      ensureCategoryRegistered(resolvedBoardCategory, formFitzgeraldColor);
+    }
+
+    const nextFitzCategory = inferFitzgeraldCategory(resolvedBoardCategory, formFitzgeraldColor);
 
     if (editingSymbol) {
-      const nextBoardCategory =
-        formCategory !== editingSymbol.category
-          ? CATEGORY_LABELS[formCategory]?.label || editingSymbol.boardCategory
-          : editingSymbol.boardCategory;
       const updatedSym: SymbolItem = {
         ...editingSymbol,
         label: cleanLabel,
         spokenText: cleanSpoken,
         speechText: cleanSpoken,
-        category: formCategory,
-        boardCategory: nextBoardCategory,
+        category: nextFitzCategory,
+        boardCategory: resolvedBoardCategory,
+        fitzgeraldColor: formFitzgeraldColor,
         iconName: formIconName,
         userModified: true,
         isPlaceholder: pendingPhotoBlob ? false : editingSymbol.isPlaceholder && !blobUrls[editingSymbol.id] && !editingSymbol.customImageUrl,
@@ -309,8 +367,9 @@ export const CaregiverMode: React.FC<CaregiverModeProps> = ({
         label: cleanLabel,
         spokenText: cleanSpoken,
         speechText: cleanSpoken,
-        category: formCategory,
-        boardCategory: CATEGORY_LABELS[formCategory]?.label,
+        category: nextFitzCategory,
+        boardCategory: resolvedBoardCategory,
+        fitzgeraldColor: formFitzgeraldColor,
         iconName: formIconName,
         isCustom: true,
         isDefault: true,
@@ -515,6 +574,7 @@ export const CaregiverMode: React.FC<CaregiverModeProps> = ({
     const encryptedPin = await encryptPin(pinCode || '1234');
     const data = {
       symbols,
+      customCategories,
       profile: {
         ...safeProfile,
         encryptedPin,
@@ -560,6 +620,9 @@ export const CaregiverMode: React.FC<CaregiverModeProps> = ({
         const parsed = JSON.parse(event.target?.result as string);
         if (parsed.symbols && Array.isArray(parsed.symbols)) {
           await onSaveSymbols(parsed.symbols);
+          if (Array.isArray(parsed.customCategories)) {
+            onSaveCustomCategories(parsed.customCategories);
+          }
           if (parsed.profile) {
             const { encryptedPin, ...restProfile } = parsed.profile as Partial<AACProfile> & {
               encryptedPin?: EncryptedPinPayload;
@@ -590,12 +653,114 @@ export const CaregiverMode: React.FC<CaregiverModeProps> = ({
     reader.readAsText(file);
   };
 
-  // Daftar folder kategori unik (prioritaskan boardCategory dari manifest)
-  const availableFolderNames = Array.from(
-    new Set(
-      symbols.map(s => s.boardCategory?.trim() || CATEGORY_LABELS[s.category]?.label || s.category)
-    )
+  // Daftar semua kategori papan (gabungan kategori kustom caregiver + kategori manifest)
+  const symbolFolderNames = symbols.map(
+    s => s.boardCategory?.trim() || CATEGORY_LABELS[s.category]?.label || s.category
   );
+  const availableFolderNames = Array.from(
+    new Set([
+      ...customCategories.map(c => c.name.trim()).filter(Boolean),
+      ...symbolFolderNames.filter(Boolean),
+    ])
+  );
+
+  // Handlers untuk pengaturan Kategori Tombol
+  const handleAddCustomCategory = (name: string, colorKey: FitzgeraldColorKey) => {
+    const trimmed = name.trim();
+    if (!trimmed) return;
+    const duplicate = availableFolderNames.some(
+      existing => existing.toLowerCase() === trimmed.toLowerCase()
+    );
+    if (duplicate) {
+      showNotification(`Kategori "${trimmed}" sudah tersedia.`);
+      return;
+    }
+    const nextList: CustomBoardCategory[] = [
+      ...customCategories,
+      { id: 'cat-' + Date.now() + '-' + Math.random().toString(36).slice(2, 5), name: trimmed, colorKey },
+    ];
+    onSaveCustomCategories(nextList);
+    setNewCategoryName('');
+    showNotification(`Kategori "${trimmed}" ditambahkan. Sekarang Anda dapat memasukkan tombol ke dalamnya.`);
+  };
+
+  const handleSaveEditedCategory = async (cat: CustomBoardCategory) => {
+    const nextName = editingCatName.trim();
+    if (!nextName) return;
+    const prevName = cat.name.trim();
+    const updatedCats = customCategories.map(c =>
+      c.id === cat.id ? { ...c, name: nextName, colorKey: editingCatColor } : c
+    );
+    onSaveCustomCategories(updatedCats);
+
+    // Perbarui semua simbol yang berada di kategori ini jika nama atau warna berubah
+    const affected = symbols.some(
+      s => (s.boardCategory?.trim() || '').toLowerCase() === prevName.toLowerCase()
+    );
+    if (affected) {
+      const nextSymbols = symbols.map(s => {
+        if ((s.boardCategory?.trim() || '').toLowerCase() !== prevName.toLowerCase()) return s;
+        return {
+          ...s,
+          boardCategory: nextName,
+          fitzgeraldColor: editingCatColor,
+          category: inferFitzgeraldCategory(nextName, editingCatColor),
+          userModified: true,
+        };
+      });
+      await onSaveSymbols(nextSymbols);
+    }
+
+    setEditingCatId(null);
+    showNotification(`Kategori "${nextName}" diperbarui.`);
+  };
+
+  const handleDeleteCustomCategory = (catId: string) => {
+    const target = customCategories.find(c => c.id === catId);
+    onSaveCustomCategories(customCategories.filter(c => c.id !== catId));
+    if (target) {
+      showNotification(`Kategori "${target.name}" dihapus dari daftar kustom (simbol tetap aman).`);
+    }
+  };
+
+  const resolveCategoryColor = (folderName: string): FitzgeraldColorKey | undefined => {
+    const custom = customCategories.find(
+      c => c.name.trim().toLowerCase() === folderName.trim().toLowerCase()
+    );
+    if (custom) return custom.colorKey;
+    const sample = symbols.find(
+      s => (s.boardCategory?.trim() || CATEGORY_LABELS[s.category]?.label || s.category).toLowerCase() === folderName.trim().toLowerCase() && s.fitzgeraldColor
+    );
+    const key = sample?.fitzgeraldColor?.toLowerCase() as FitzgeraldColorKey | undefined;
+    return key && FITZGERALD_COLOR_STYLES[key] ? key : undefined;
+  };
+
+  const handleAssignSymbolCategory = async (symbolIds: string[], targetFolderName: string) => {
+    const trimmed = targetFolderName.trim();
+    if (!trimmed || symbolIds.length === 0) return;
+    const idSet = new Set(symbolIds);
+    const colorKey = resolveCategoryColor(trimmed);
+    const nextFitzCat = inferFitzgeraldCategory(trimmed, colorKey);
+
+    const updatedSymbols = symbols.map(s => {
+      if (!idSet.has(s.id)) return s;
+      return {
+        ...s,
+        boardCategory: trimmed,
+        fitzgeraldColor: colorKey || s.fitzgeraldColor,
+        category: nextFitzCat,
+        userModified: true,
+      };
+    });
+
+    await onSaveSymbols(updatedSymbols);
+    setSelectedSymbolIds([]);
+    showNotification(
+      symbolIds.length === 1
+        ? `Tombol dipindahkan ke kategori "${trimmed}".`
+        : `${symbolIds.length} tombol dipindahkan ke kategori "${trimmed}".`
+    );
+  };
 
   // Symbols needing photos (placeholder atau gambar belum terunduh)
   const needPhotoSymbols = symbols.filter(
@@ -690,6 +855,7 @@ export const CaregiverMode: React.FC<CaregiverModeProps> = ({
           <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar">
             {[
               { id: 'symbols', label: 'Kelola Simbol', icon: ImageIcon },
+              { id: 'categories', label: 'Kategori Tombol', icon: Tag },
               { id: 'updates', label: 'Pembaruan Simbol', icon: RefreshCw },
               { id: 'diagnostics', label: 'Diagnostik', icon: Activity },
               { id: 'profile', label: 'Profil & Suara', icon: Settings },
@@ -915,6 +1081,422 @@ export const CaregiverMode: React.FC<CaregiverModeProps> = ({
             </div>
           </div>
         )}
+
+        {/* --- TAB 2: KATEGORI TOMBOL --- */}
+        {activeTab === 'categories' && (() => {
+          const availablePresets = PRESET_BOARD_CATEGORIES.filter(
+            preset =>
+              !availableFolderNames.some(
+                existing => existing.toLowerCase() === preset.name.toLowerCase()
+              )
+          );
+
+          const folderCounts = new Map<string, number>();
+          for (const sym of symbols) {
+            const name = sym.boardCategory?.trim() || CATEGORY_LABELS[sym.category]?.label || sym.category;
+            folderCounts.set(name, (folderCounts.get(name) || 0) + 1);
+          }
+
+          const categoryFilteredSymbols = symbols.filter(s => {
+            const folderName = s.boardCategory?.trim() || CATEGORY_LABELS[s.category]?.label || s.category;
+            const matchFolder = catManagerFilter === 'all' || folderName === catManagerFilter;
+            const q = catManagerSearch.trim().toLowerCase();
+            const matchSearch =
+              q === '' ||
+              s.label.toLowerCase().includes(q) ||
+              (s.speechText || '').toLowerCase().includes(q) ||
+              (s.tagsEn || []).some(t => t.toLowerCase().includes(q));
+            return matchFolder && matchSearch;
+          });
+
+          const effectiveBulkTarget =
+            bulkTargetCategory || availableFolderNames[0] || '';
+
+          const allVisibleIds = categoryFilteredSymbols.map(s => s.id);
+          const selectedVisibleCount = allVisibleIds.filter(id => selectedSymbolIds.includes(id)).length;
+          const allVisibleSelected =
+            allVisibleIds.length > 0 && selectedVisibleCount === allVisibleIds.length;
+
+          return (
+            <div className="space-y-6">
+              <div>
+                <h2 className="text-xl sm:text-2xl font-extrabold text-slate-900 dark:text-white">
+                  Pengaturan Kategori Tombol
+                </h2>
+                <p className="text-sm text-slate-500 dark:text-slate-400">
+                  Buat kategori khusus seperti Anggota Keluarga, Buah, atau lainnya, lalu kelompokkan tombol agar mudah ditemukan di papan utama.
+                </p>
+              </div>
+
+              {/* 1. Tambah Kategori Baru & Preset Cepat */}
+              <div className="bg-white dark:bg-slate-900 p-5 sm:p-6 rounded-2xl border border-slate-200 dark:border-slate-800 space-y-4">
+                <h3 className="font-bold text-base text-slate-900 dark:text-white">
+                  Buat Kategori Baru
+                </h3>
+
+                <form
+                  onSubmit={e => {
+                    e.preventDefault();
+                    handleAddCustomCategory(newCategoryName, newCategoryColor);
+                  }}
+                  className="grid grid-cols-1 sm:grid-cols-12 gap-3 items-end"
+                >
+                  <div className="sm:col-span-6">
+                    <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1.5">
+                      Nama Kategori
+                    </label>
+                    <input
+                      type="text"
+                      placeholder="Contoh: Anggota Keluarga, Buah, Hewan..."
+                      value={newCategoryName}
+                      onChange={e => setNewCategoryName(e.target.value)}
+                      className="w-full min-h-[44px] px-3.5 py-2 rounded-xl bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-sm text-slate-900 dark:text-white"
+                    />
+                  </div>
+                  <div className="sm:col-span-4">
+                    <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1.5">
+                      Warna Kartu (Fitzgerald Key)
+                    </label>
+                    <select
+                      value={newCategoryColor}
+                      onChange={e => setNewCategoryColor(e.target.value as FitzgeraldColorKey)}
+                      className="w-full min-h-[44px] px-3.5 py-2 rounded-xl bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-sm font-semibold text-slate-900 dark:text-white"
+                    >
+                      {Object.entries(FITZGERALD_COLOR_STYLES).map(([key, style]) => (
+                        <option key={key} value={key}>
+                          {style.label}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <div className="sm:col-span-2">
+                    <button
+                      type="submit"
+                      disabled={!newCategoryName.trim()}
+                      className="w-full min-h-[44px] px-4 py-2 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white font-bold rounded-xl text-sm flex items-center justify-center gap-1.5 transition-colors"
+                    >
+                      <Plus className="w-4 h-4" />
+                      <span>Tambah</span>
+                    </button>
+                  </div>
+                </form>
+
+                {availablePresets.length > 0 && (
+                  <div className="pt-2 border-t border-slate-100 dark:border-slate-800 space-y-2">
+                    <span className="text-xs font-semibold text-slate-500 dark:text-slate-400 block">
+                      Tambah cepat kategori populer:
+                    </span>
+                    <div className="flex flex-wrap gap-2">
+                      {availablePresets.map(preset => {
+                        const swatch = FITZGERALD_COLOR_STYLES[preset.colorKey]?.swatch || 'bg-slate-400';
+                        return (
+                          <button
+                            key={preset.id}
+                            type="button"
+                            onClick={() => handleAddCustomCategory(preset.name, preset.colorKey)}
+                            className="px-3 py-1.5 min-h-[36px] rounded-xl bg-slate-50 dark:bg-slate-800 hover:bg-slate-100 dark:hover:bg-slate-700 border border-slate-200 dark:border-slate-700 text-xs font-semibold text-slate-800 dark:text-slate-100 flex items-center gap-2 transition-colors"
+                          >
+                            <span className={`w-2.5 h-2.5 rounded-full ${swatch}`} />
+                            <span>+ {preset.name}</span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {/* 2. Daftar Kategori Tersedia */}
+              <div className="bg-white dark:bg-slate-900 p-5 sm:p-6 rounded-2xl border border-slate-200 dark:border-slate-800 space-y-4">
+                <div className="flex items-center justify-between">
+                  <h3 className="font-bold text-base text-slate-900 dark:text-white">
+                    Daftar Kategori ({availableFolderNames.length})
+                  </h3>
+                  <span className="text-xs text-slate-500 dark:text-slate-400">
+                    Tab kategori tampil otomatis di papan bila berisi minimal 1 tombol.
+                  </span>
+                </div>
+
+                {customCategories.length > 0 && (
+                  <div className="space-y-2">
+                    <span className="text-xs font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400 block">
+                      Kategori Buatan Caregiver
+                    </span>
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-2.5">
+                      {customCategories.map(cat => {
+                        const count = folderCounts.get(cat.name) || 0;
+                        const swatch = FITZGERALD_COLOR_STYLES[cat.colorKey]?.swatch || 'bg-slate-400';
+                        const isEditingThis = editingCatId === cat.id;
+
+                        return (
+                          <div
+                            key={cat.id}
+                            className="p-3 rounded-xl bg-slate-50 dark:bg-slate-800/70 border border-slate-200 dark:border-slate-700 flex flex-col gap-2"
+                          >
+                            {isEditingThis ? (
+                              <div className="flex flex-wrap items-center gap-2">
+                                <input
+                                  type="text"
+                                  value={editingCatName}
+                                  onChange={e => setEditingCatName(e.target.value)}
+                                  className="flex-1 min-w-[140px] min-h-[36px] px-2.5 py-1 rounded-lg bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-600 text-xs font-semibold text-slate-900 dark:text-white"
+                                />
+                                <select
+                                  value={editingCatColor}
+                                  onChange={e => setEditingCatColor(e.target.value as FitzgeraldColorKey)}
+                                  className="min-h-[36px] px-2 py-1 rounded-lg bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-600 text-xs text-slate-900 dark:text-white"
+                                >
+                                  {Object.entries(FITZGERALD_COLOR_STYLES).map(([k, v]) => (
+                                    <option key={k} value={k}>
+                                      {v.label}
+                                    </option>
+                                  ))}
+                                </select>
+                                <button
+                                  type="button"
+                                  onClick={() => handleSaveEditedCategory(cat)}
+                                  className="px-3 py-1.5 min-h-[34px] rounded-lg bg-emerald-600 text-white text-xs font-bold"
+                                >
+                                  Simpan
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => setEditingCatId(null)}
+                                  className="px-2.5 py-1.5 min-h-[34px] rounded-lg bg-slate-200 dark:bg-slate-700 text-slate-700 dark:text-slate-200 text-xs font-semibold"
+                                >
+                                  Batal
+                                </button>
+                              </div>
+                            ) : (
+                              <div className="flex items-center justify-between gap-2">
+                                <div className="flex items-center gap-2.5 min-w-0">
+                                  <span className={`w-3.5 h-3.5 rounded-full shrink-0 ${swatch}`} />
+                                  <span className="font-bold text-sm text-slate-900 dark:text-white truncate">
+                                    {cat.name}
+                                  </span>
+                                  <span className="text-xs font-semibold text-slate-500 dark:text-slate-400 tabular-nums shrink-0">
+                                    ({count} tombol)
+                                  </span>
+                                </div>
+                                <div className="flex items-center gap-1.5 shrink-0">
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      setEditingCatId(cat.id);
+                                      setEditingCatName(cat.name);
+                                      setEditingCatColor(cat.colorKey);
+                                    }}
+                                    className="px-2.5 py-1 min-h-[32px] rounded-lg bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 text-xs font-semibold text-slate-700 dark:text-slate-200"
+                                  >
+                                    Ubah
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => handleDeleteCustomCategory(cat.id)}
+                                    className="px-2.5 py-1 min-h-[32px] rounded-lg bg-rose-50 dark:bg-rose-950/50 border border-rose-200 dark:border-rose-800 text-xs font-semibold text-rose-700 dark:text-rose-300"
+                                  >
+                                    Hapus
+                                  </button>
+                                </div>
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+
+                <div className="flex flex-wrap gap-2">
+                  {availableFolderNames.map(folder => {
+                    const count = folderCounts.get(folder) || 0;
+                    const colorKey = resolveCategoryColor(folder);
+                    const swatch = colorKey ? FITZGERALD_COLOR_STYLES[colorKey].swatch : 'bg-slate-400';
+                    return (
+                      <button
+                        key={folder}
+                        type="button"
+                        onClick={() => setCatManagerFilter(prev => (prev === folder ? 'all' : folder))}
+                        className={`px-3 py-1.5 min-h-[36px] rounded-xl text-xs font-semibold border flex items-center gap-2 transition-colors ${
+                          catManagerFilter === folder
+                            ? 'bg-slate-900 dark:bg-emerald-600 text-white border-transparent'
+                            : 'bg-slate-50 dark:bg-slate-800 text-slate-700 dark:text-slate-200 border-slate-200 dark:border-slate-700'
+                        }`}
+                      >
+                        <span className={`w-2.5 h-2.5 rounded-full ${swatch}`} />
+                        <span>{folder}</span>
+                        <span className="opacity-70 tabular-nums">({count})</span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* 3. Kelola & Pindahkan Tombol ke Kategori */}
+              <div className="bg-white dark:bg-slate-900 p-5 sm:p-6 rounded-2xl border border-slate-200 dark:border-slate-800 space-y-4">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                  <div>
+                    <h3 className="font-bold text-base text-slate-900 dark:text-white">
+                      Kategorikan Tombol Simbol ({categoryFilteredSymbols.length})
+                    </h3>
+                    <p className="text-xs text-slate-500 dark:text-slate-400">
+                      Ubah kategori langsung pada setiap tombol atau centang beberapa tombol sekaligus untuk dipindahkan massal.
+                    </p>
+                  </div>
+                </div>
+
+                {/* Search & Filter */}
+                <div className="flex flex-col sm:flex-row gap-2.5">
+                  <div className="relative flex-1">
+                    <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
+                    <input
+                      type="text"
+                      placeholder="Cari tombol (mis. ibu, ayah, apel, pisang, susu)..."
+                      value={catManagerSearch}
+                      onChange={e => setCatManagerSearch(e.target.value)}
+                      className="w-full min-h-[42px] pl-9 pr-3 py-2 rounded-xl bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-sm text-slate-900 dark:text-white"
+                    />
+                  </div>
+                  <select
+                    value={catManagerFilter}
+                    onChange={e => setCatManagerFilter(e.target.value)}
+                    className="min-h-[42px] px-3.5 py-2 rounded-xl bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-sm font-semibold text-slate-800 dark:text-slate-100"
+                  >
+                    <option value="all">Semua Kategori</option>
+                    {availableFolderNames.map(folder => (
+                      <option key={folder} value={folder}>
+                        {folder}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                {/* Bulk Selection & Move Toolbar */}
+                <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3 p-3.5 rounded-xl bg-slate-50 dark:bg-slate-800/80 border border-slate-200 dark:border-slate-700">
+                  <div className="flex items-center gap-2.5 flex-wrap">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (allVisibleSelected) {
+                          setSelectedSymbolIds(prev => prev.filter(id => !allVisibleIds.includes(id)));
+                        } else {
+                          setSelectedSymbolIds(Array.from(new Set([...selectedSymbolIds, ...allVisibleIds])));
+                        }
+                      }}
+                      className="px-3 py-1.5 min-h-[36px] rounded-lg bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 text-xs font-semibold text-slate-800 dark:text-slate-100 flex items-center gap-1.5"
+                    >
+                      {allVisibleSelected ? (
+                        <CheckSquare className="w-4 h-4 text-emerald-600" />
+                      ) : (
+                        <Square className="w-4 h-4 text-slate-400" />
+                      )}
+                      <span>{allVisibleSelected ? 'Batal pilih semua' : 'Pilih semua tampil'}</span>
+                    </button>
+
+                    {selectedSymbolIds.length > 0 && (
+                      <button
+                        type="button"
+                        onClick={() => setSelectedSymbolIds([])}
+                        className="text-xs font-semibold text-slate-500 hover:text-slate-800 dark:text-slate-400 dark:hover:text-white underline"
+                      >
+                        Bersihkan pilihan ({selectedSymbolIds.length})
+                      </button>
+                    )}
+                  </div>
+
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className="text-xs font-semibold text-slate-700 dark:text-slate-300">
+                      Pindahkan {selectedSymbolIds.length} tombol ke:
+                    </span>
+                    <select
+                      value={effectiveBulkTarget}
+                      onChange={e => setBulkTargetCategory(e.target.value)}
+                      className="min-h-[38px] px-3 py-1.5 rounded-lg bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-600 text-xs font-semibold text-slate-900 dark:text-white"
+                    >
+                      {availableFolderNames.map(folder => (
+                        <option key={folder} value={folder}>
+                          {folder}
+                        </option>
+                      ))}
+                    </select>
+                    <button
+                      type="button"
+                      disabled={selectedSymbolIds.length === 0 || !effectiveBulkTarget}
+                      onClick={() => handleAssignSymbolCategory(selectedSymbolIds, effectiveBulkTarget)}
+                      className="px-4 py-1.5 min-h-[38px] rounded-lg bg-emerald-600 hover:bg-emerald-700 disabled:opacity-45 text-white text-xs font-bold transition-colors"
+                    >
+                      Terapkan Kategori
+                    </button>
+                  </div>
+                </div>
+
+                {/* Symbol Categorization List */}
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-2.5 max-h-[520px] overflow-y-auto pr-1">
+                  {categoryFilteredSymbols.map(sym => {
+                    const currentFolder =
+                      sym.boardCategory?.trim() || CATEGORY_LABELS[sym.category]?.label || sym.category;
+                    const isChecked = selectedSymbolIds.includes(sym.id);
+                    return (
+                      <div
+                        key={sym.id}
+                        className={`p-3 rounded-xl border flex items-center justify-between gap-3 transition-colors ${
+                          isChecked
+                            ? 'bg-emerald-50/70 dark:bg-emerald-950/30 border-emerald-400 dark:border-emerald-700'
+                            : 'bg-slate-50/60 dark:bg-slate-800/40 border-slate-200 dark:border-slate-700'
+                        }`}
+                      >
+                        <div className="flex items-center gap-2.5 min-w-0 flex-1">
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setSelectedSymbolIds(prev =>
+                                prev.includes(sym.id) ? prev.filter(id => id !== sym.id) : [...prev, sym.id]
+                              )
+                            }
+                            aria-label={`Pilih ${sym.label}`}
+                            className="p-1 shrink-0 text-slate-600 dark:text-slate-300"
+                          >
+                            {isChecked ? (
+                              <CheckSquare className="w-5 h-5 text-emerald-600 dark:text-emerald-400" />
+                            ) : (
+                              <Square className="w-5 h-5 text-slate-400" />
+                            )}
+                          </button>
+
+                          <div className="w-10 h-10 rounded-lg bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 flex items-center justify-center overflow-hidden shrink-0">
+                            {renderSymbolPreview(sym)}
+                          </div>
+
+                          <div className="min-w-0">
+                            <p className="text-sm font-bold text-slate-900 dark:text-white truncate">
+                              {sym.label}
+                            </p>
+                            <p className="text-[11px] text-slate-500 dark:text-slate-400 truncate">
+                              {currentFolder}
+                            </p>
+                          </div>
+                        </div>
+
+                        <select
+                          aria-label={`Kategori untuk ${sym.label}`}
+                          value={currentFolder}
+                          onChange={e => handleAssignSymbolCategory([sym.id], e.target.value)}
+                          className="max-w-[165px] min-h-[38px] px-2.5 py-1.5 rounded-lg bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-600 text-xs font-semibold text-slate-900 dark:text-white shrink-0"
+                        >
+                          {availableFolderNames.map(folder => (
+                            <option key={folder} value={folder}>
+                              {folder}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            </div>
+          );
+        })()}
 
         {/* --- TAB: SYMBOL UPDATES --- */}
         {activeTab === 'updates' && (
@@ -2070,16 +2652,52 @@ export const CaregiverMode: React.FC<CaregiverModeProps> = ({
 
               <div>
                 <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1.5">
-                  Kategori Fitzgerald
+                  Kategori Tombol (Folder Papan)
                 </label>
                 <select
-                  value={formCategory}
-                  onChange={e => setFormCategory(e.target.value as FitzgeraldCategory)}
+                  value={formBoardCategory}
+                  onChange={e => {
+                    const nextVal = e.target.value;
+                    setFormBoardCategory(nextVal);
+                    if (nextVal !== '__custom__') {
+                      const matchedColor = resolveCategoryColor(nextVal);
+                      if (matchedColor) setFormFitzgeraldColor(matchedColor);
+                    }
+                  }}
                   className="w-full min-h-[42px] px-3.5 py-2 rounded-xl bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-sm text-slate-900 dark:text-white"
                 >
-                  {Object.entries(CATEGORY_LABELS).map(([key, val]) => (
+                  {availableFolderNames.map(folder => (
+                    <option key={folder} value={folder}>
+                      {folder}
+                    </option>
+                  ))}
+                  <option value="__custom__">+ Buat kategori baru...</option>
+                </select>
+
+                {formBoardCategory === '__custom__' && (
+                  <input
+                    type="text"
+                    required
+                    placeholder="Contoh: Anggota Keluarga, Buah, Hewan..."
+                    value={formCustomCategoryInput}
+                    onChange={e => setFormCustomCategoryInput(e.target.value)}
+                    className="mt-2 w-full min-h-[42px] px-3.5 py-2 rounded-xl bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-sm text-slate-900 dark:text-white"
+                  />
+                )}
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1.5">
+                  Warna Kartu (Fitzgerald Key)
+                </label>
+                <select
+                  value={formFitzgeraldColor}
+                  onChange={e => setFormFitzgeraldColor(e.target.value as FitzgeraldColorKey)}
+                  className="w-full min-h-[42px] px-3.5 py-2 rounded-xl bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-sm text-slate-900 dark:text-white"
+                >
+                  {Object.entries(FITZGERALD_COLOR_STYLES).map(([key, style]) => (
                     <option key={key} value={key}>
-                      {val.label}
+                      {style.label}
                     </option>
                   ))}
                 </select>

@@ -10,6 +10,7 @@ import {
   SyncSummary,
   SyncDiagnostics,
   AdaptiveSuggestion,
+  CustomBoardCategory,
 } from './types';
 import { BUNDLED_SYMBOLS_VERSION } from './config/symbolSource';
 import {
@@ -20,6 +21,8 @@ import {
   getStoredConsent,
   setStoredConsent,
   generateAdaptiveSuggestions,
+  getStoredCustomCategories,
+  saveCustomCategories,
 } from './services/storage';
 import {
   idbGetAllSymbols,
@@ -67,6 +70,7 @@ export default function App() {
   const [syncSummary, setSyncSummary] = useState<SyncSummary | null>(null);
 
   const [profile, setProfile] = useState<AACProfile>(getStoredProfile());
+  const [customCategories, setCustomCategories] = useState<CustomBoardCategory[]>(getStoredCustomCategories());
   const [logs, setLogs] = useState<UsageLog[]>([]);
   const [currentLocation, setCurrentLocation] = useState<LocationContextType>('Rumah');
   const [sentence, setSentence] = useState<SentenceItem[]>([]);
@@ -360,6 +364,11 @@ export default function App() {
     saveProfile(newProfile);
   };
 
+  const handleSaveCustomCategories = (nextCategories: CustomBoardCategory[]) => {
+    setCustomCategories(nextCategories);
+    saveCustomCategories(nextCategories);
+  };
+
   const handleContinueOfflineText = async () => {
     const fallbackSymbols = await activateOfflineTextFallback();
     const [urls, meta] = await Promise.all([idbPreloadAllBlobUrls(), getManifestMeta()]);
@@ -449,6 +458,8 @@ export default function App() {
           onResetBundledSymbols={handleResetBundledSymbols}
           profile={profile}
           onSaveProfile={handleSaveProfile}
+          customCategories={customCategories}
+          onSaveCustomCategories={handleSaveCustomCategories}
           logs={logs}
           onClose={() => {
             setIsCaregiverMode(false);
@@ -501,6 +512,7 @@ export default function App() {
           <UserMode
             symbols={symbols}
             blobUrls={blobUrls}
+            customCategories={customCategories}
             figurePreference={profile.figurePreference || 'all'}
             safeLicenseMode={profile.safeLicenseMode !== false}
             onSelectSymbol={handleSelectSymbol}

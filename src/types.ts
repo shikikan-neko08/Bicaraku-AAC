@@ -10,6 +10,14 @@ export type FitzgeraldCategory =
   | 'activities'  /* Aktivitas (Cyan) */
   | 'emergency';  /* Darurat (Red bold) */
 
+export type FitzgeraldColorKey = 'pink' | 'green' | 'orange' | 'blue' | 'yellow' | 'white';
+
+export interface CustomBoardCategory {
+  id: string;
+  name: string;
+  colorKey: FitzgeraldColorKey;
+}
+
 export type SymbolDownloadStatus = 'pending' | 'done' | 'failed' | 'placeholder';
 
 export type FigurePreference = 'all' | 'female' | 'male';

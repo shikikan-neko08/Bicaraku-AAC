@@ -1,12 +1,13 @@
-import React, { useState, useMemo } from 'react';
-import { SymbolItem, GridSize, FigurePreference } from '../types';
+import React, { useState, useMemo, useRef, useEffect, useCallback } from 'react';
+import { SymbolItem, GridSize, FigurePreference, CustomBoardCategory } from '../types';
 import { CATEGORY_LABELS, FITZGERALD_COLOR_STYLES } from '../data/defaultSymbols';
 import { SymbolCard } from './SymbolCard';
-import { Search, X, Layers } from 'lucide-react';
+import { Search, X, Layers, ChevronLeft, ChevronRight } from 'lucide-react';
 
 interface UserModeProps {
   symbols: SymbolItem[];
   blobUrls: Record<string, string>;
+  customCategories?: CustomBoardCategory[];
   figurePreference: FigurePreference;
   safeLicenseMode: boolean;
   onSelectSymbol: (symbol: SymbolItem) => void;
@@ -65,7 +66,15 @@ function getSymbolFolderLabel(sym: SymbolItem): string {
   return CATEGORY_LABELS[sym.category]?.label || sym.category || 'Lainnya';
 }
 
-function getFolderSwatch(sym: SymbolItem): string {
+function getFolderSwatch(
+  sym: SymbolItem,
+  customCatMap?: Map<string, CustomBoardCategory>
+): string {
+  const folderName = getSymbolFolderLabel(sym).toLowerCase();
+  const customMatch = customCatMap?.get(folderName);
+  if (customMatch && FITZGERALD_COLOR_STYLES[customMatch.colorKey]) {
+    return FITZGERALD_COLOR_STYLES[customMatch.colorKey].swatch;
+  }
   if (sym.fitzgeraldColor && FITZGERALD_COLOR_STYLES[sym.fitzgeraldColor.toLowerCase()]) {
     return FITZGERALD_COLOR_STYLES[sym.fitzgeraldColor.toLowerCase()].swatch;
   }
@@ -75,6 +84,7 @@ function getFolderSwatch(sym: SymbolItem): string {
 export const UserMode: React.FC<UserModeProps> = ({
   symbols,
   blobUrls,
+  customCategories = [],
   figurePreference,
   safeLicenseMode,
   onSelectSymbol,
@@ -92,11 +102,15 @@ export const UserMode: React.FC<UserModeProps> = ({
     title: string;
     variants: SymbolItem[];
   } | null>(null);
+  const folderScrollRef = useRef<HTMLDivElement>(null);
+  const [canScrollLeft, setCanScrollLeft] = useState(false);
+  const [canScrollRight, setCanScrollRight] = useState(false);
 
   // Kelompokkan seluruh simbol aman berdasarkan variantGroup untuk Symbol Picker & Preferensi Figur
   const { boardEntries, variantsByGroup, folderTabs } = useMemo(() => {
     const safePool = symbols.filter(sym => isSafeForBoard(sym, safeLicenseMode));
     const groupMap = new Map<string, SymbolItem[]>();
+    const customCatMap = new Map(customCategories.map(c => [c.name.trim().toLowerCase(), c]));
 
     for (const sym of safePool) {
       if (sym.variantGroup) {
@@ -120,18 +134,36 @@ export const UserMode: React.FC<UserModeProps> = ({
       return preferred || sym;
     });
 
-    // Kumpulkan folder kategori dari manifest (category) beserta warna Fitzgerald representatifnya
+    // Kumpulkan folder kategori dari manifest & kategori kustom caregiver
     const folderMap = new Map<string, string>();
     for (const sym of resolved) {
       const folderName = getSymbolFolderLabel(sym);
       if (!folderMap.has(folderName)) {
-        folderMap.set(folderName, getFolderSwatch(sym));
+        folderMap.set(folderName, getFolderSwatch(sym, customCatMap));
       }
     }
-    const tabs = Array.from(folderMap.entries()).map(([name, swatch]) => ({ name, swatch }));
 
-    return { boardEntries: resolved, variantsByGroup: groupMap, folderTabs: tabs };
-  }, [symbols, safeLicenseMode, figurePreference]);
+    // Prioritaskan urutan kategori kustom milik caregiver yang aktif berisi simbol
+    const customTabs: { name: string; swatch: string }[] = [];
+    const customNameSet = new Set<string>();
+    for (const cat of customCategories) {
+      const matchingKey = Array.from(folderMap.keys()).find(
+        k => k.toLowerCase() === cat.name.trim().toLowerCase()
+      );
+      if (matchingKey) {
+        customTabs.push({
+          name: matchingKey,
+          swatch: FITZGERALD_COLOR_STYLES[cat.colorKey]?.swatch || folderMap.get(matchingKey) || 'bg-slate-400',
+        });
+        customNameSet.add(matchingKey);
+      }
+    }
+    const otherTabs = Array.from(folderMap.entries())
+      .filter(([name]) => !customNameSet.has(name))
+      .map(([name, swatch]) => ({ name, swatch }));
+
+    return { boardEntries: resolved, variantsByGroup: groupMap, folderTabs: [...customTabs, ...otherTabs] };
+  }, [symbols, customCategories, safeLicenseMode, figurePreference]);
 
   const effectiveSelectedFolder =
     selectedFolder === 'all' || folderTabs.some(t => t.name === selectedFolder)
@@ -168,65 +200,121 @@ export const UserMode: React.FC<UserModeProps> = ({
     });
   };
 
+  const updateFolderScrollState = useCallback(() => {
+    const el = folderScrollRef.current;
+    if (!el) return;
+    const maxScroll = el.scrollWidth - el.clientWidth;
+    setCanScrollLeft(el.scrollLeft > 4);
+    setCanScrollRight(maxScroll - el.scrollLeft > 4);
+  }, []);
+
+  useEffect(() => {
+    updateFolderScrollState();
+    const timer = window.setTimeout(updateFolderScrollState, 80);
+    window.addEventListener('resize', updateFolderScrollState);
+    return () => {
+      window.clearTimeout(timer);
+      window.removeEventListener('resize', updateFolderScrollState);
+    };
+  }, [updateFolderScrollState, folderTabs.length]);
+
+  const scrollFoldersBy = (direction: 'left' | 'right') => {
+    const el = folderScrollRef.current;
+    if (!el) return;
+    const delta = Math.max(220, Math.round(el.clientWidth * 0.7));
+    el.scrollBy({
+      left: direction === 'left' ? -delta : delta,
+      behavior: 'smooth',
+    });
+  };
+
   return (
     <main className="max-w-7xl w-full mx-auto px-4 sm:px-6 py-4 sm:py-5 flex flex-col gap-4 sm:gap-5">
       {/* Category Folders & Search Toolbar */}
       <div className="flex flex-col lg:flex-row items-stretch lg:items-center justify-between gap-3 bg-white dark:bg-slate-900 p-3 sm:p-3.5 rounded-2xl border border-slate-200 dark:border-slate-800 shadow-xs">
-        {/* Category Folder Tabs */}
-        <div
-          className="flex items-center gap-1.5 overflow-x-auto no-scrollbar pb-1 lg:pb-0"
-          role="tablist"
-          aria-label="Folder Kategori Simbol"
-        >
+        {/* Category Folder Tabs with Left/Right Arrow Navigation */}
+        <div className="flex items-center gap-1.5 min-w-0 flex-1">
           <button
-            role="tab"
-            aria-selected={effectiveSelectedFolder === 'all'}
-            onClick={() => setSelectedFolder('all')}
-            className={`px-3.5 py-2 min-h-[42px] rounded-xl font-semibold text-sm shrink-0 whitespace-nowrap flex items-center gap-2 transition-colors ${
-              effectiveSelectedFolder === 'all'
-                ? 'bg-slate-900 dark:bg-blue-600 text-white shadow-xs'
-                : 'bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-700'
-            }`}
+            type="button"
+            onClick={() => scrollFoldersBy('left')}
+            disabled={!canScrollLeft}
+            aria-label="Geser kategori ke kiri"
+            title="Geser ke kiri"
+            className="min-w-[42px] min-h-[46px] rounded-xl bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 disabled:opacity-35 disabled:pointer-events-none text-slate-700 dark:text-slate-200 border border-slate-200 dark:border-slate-700 flex items-center justify-center shrink-0 transition-colors"
             style={{ touchAction: 'manipulation' }}
           >
-            <span>Semua Simbol</span>
+            <ChevronLeft className="w-5 h-5" />
           </button>
 
-          {folderTabs.map(folder => {
-            const isActive = effectiveSelectedFolder === folder.name;
-            return (
-              <button
-                key={folder.name}
-                role="tab"
-                aria-selected={isActive}
-                onClick={() => setSelectedFolder(folder.name)}
-                className={`px-3.5 py-2 min-h-[42px] rounded-xl font-semibold text-sm shrink-0 whitespace-nowrap flex items-center gap-2 transition-colors ${
-                  isActive
-                    ? 'bg-slate-900 dark:bg-blue-600 text-white shadow-xs'
-                    : 'bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-700'
-                }`}
-                style={{ touchAction: 'manipulation' }}
-              >
-                <span
-                  className={`w-2.5 h-2.5 rounded-full shrink-0 ${folder.swatch}`}
-                  aria-hidden="true"
-                />
-                <span>{folder.name}</span>
-              </button>
-            );
-          })}
+          <div
+            ref={folderScrollRef}
+            onScroll={updateFolderScrollState}
+            className="flex-1 min-w-0 flex items-center gap-1.5 overflow-x-auto no-scrollbar scroll-smooth"
+            role="tablist"
+            aria-label="Folder Kategori Simbol"
+          >
+            <button
+              role="tab"
+              aria-selected={effectiveSelectedFolder === 'all'}
+              onClick={() => setSelectedFolder('all')}
+              className={`px-4 py-2 min-h-[46px] rounded-xl font-bold text-base sm:text-lg shrink-0 whitespace-nowrap flex items-center gap-2 transition-colors ${
+                effectiveSelectedFolder === 'all'
+                  ? 'bg-slate-900 dark:bg-blue-600 text-white shadow-xs'
+                  : 'bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-700'
+              }`}
+              style={{ touchAction: 'manipulation' }}
+            >
+              <span>Semua Simbol</span>
+            </button>
+
+            {folderTabs.map(folder => {
+              const isActive = effectiveSelectedFolder === folder.name;
+              return (
+                <button
+                  key={folder.name}
+                  role="tab"
+                  aria-selected={isActive}
+                  onClick={() => setSelectedFolder(folder.name)}
+                  className={`px-4 py-2 min-h-[46px] rounded-xl font-bold text-base sm:text-lg shrink-0 whitespace-nowrap flex items-center gap-2 transition-colors ${
+                    isActive
+                      ? 'bg-slate-900 dark:bg-blue-600 text-white shadow-xs'
+                      : 'bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-700'
+                  }`}
+                  style={{ touchAction: 'manipulation' }}
+                >
+                  <span
+                    className={`w-3 h-3 rounded-full shrink-0 ${folder.swatch}`}
+                    aria-hidden="true"
+                  />
+                  <span>{folder.name}</span>
+                </button>
+              );
+            })}
+          </div>
+
+          <button
+            type="button"
+            onClick={() => scrollFoldersBy('right')}
+            disabled={!canScrollRight}
+            aria-label="Geser kategori ke kanan"
+            title="Geser ke kanan"
+            className="min-w-[42px] min-h-[46px] rounded-xl bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 disabled:opacity-35 disabled:pointer-events-none text-slate-700 dark:text-slate-200 border border-slate-200 dark:border-slate-700 flex items-center justify-center shrink-0 transition-colors"
+            style={{ touchAction: 'manipulation' }}
+          >
+            <ChevronRight className="w-5 h-5" />
+          </button>
         </div>
 
         {/* Search & Mobile Grid Size */}
         <div className="flex items-center gap-2.5 shrink-0">
-          <div className="relative flex-1 lg:w-56">
+          <div className="relative flex-1 lg:w-60">
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400 pointer-events-none" />
             <input
               type="text"
               placeholder="Cari simbol..."
               value={searchQuery}
               onChange={e => setSearchQuery(e.target.value)}
-              className="w-full min-h-[42px] pl-9 pr-8 py-2 rounded-xl bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-sm text-slate-900 dark:text-white placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500"
+              className="w-full min-h-[46px] pl-9 pr-8 py-2 rounded-xl bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-base text-slate-900 dark:text-white placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500"
             />
             {searchQuery && (
               <button
@@ -311,10 +399,10 @@ export const UserMode: React.FC<UserModeProps> = ({
                   <Layers className="w-4 h-4" />
                 </div>
                 <div>
-                  <h2 className="text-lg font-extrabold text-slate-900 dark:text-white">
+                  <h2 className="text-xl font-extrabold text-slate-900 dark:text-white">
                     Varian lain: {variantPickerGroup.title}
                   </h2>
-                  <p className="text-xs text-slate-500 dark:text-slate-400">
+                  <p className="text-sm text-slate-500 dark:text-slate-400">
                     Pilih varian simbol untuk langsung dimasukkan ke kalimat.
                   </p>
                 </div>
@@ -350,7 +438,7 @@ export const UserMode: React.FC<UserModeProps> = ({
                     gridSize={3}
                   />
                   {variant.variantNote && (
-                    <span className="text-[11px] text-center text-slate-500 dark:text-slate-400 line-clamp-1 px-1">
+                    <span className="text-xs sm:text-sm text-center text-slate-500 dark:text-slate-400 line-clamp-1 px-1">
                       {variant.variantNote}
                     </span>
                   )}
