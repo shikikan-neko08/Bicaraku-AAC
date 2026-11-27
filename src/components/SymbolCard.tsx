@@ -1,11 +1,15 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { SymbolItem, GridSize } from '../types';
-import { CATEGORY_LABELS } from '../data/defaultSymbols';
-import * as Icons from 'lucide-react';
+import { CATEGORY_LABELS, FITZGERALD_COLOR_STYLES } from '../data/defaultSymbols';
+import { Camera, Layers } from 'lucide-react';
 
 interface SymbolCardProps {
   symbol: SymbolItem;
+  blobUrl?: string;
+  hasVariants?: boolean;
   onSelect: (symbol: SymbolItem) => void;
+  onOpenVariants?: (symbol: SymbolItem) => void;
+  onAddPhoto?: (symbol: SymbolItem) => void;
   showTextOnly?: boolean;
   imageOnly?: boolean;
   touchDelay?: number; // seconds
@@ -14,7 +18,11 @@ interface SymbolCardProps {
 
 export const SymbolCard: React.FC<SymbolCardProps> = ({
   symbol,
+  blobUrl,
+  hasVariants = false,
   onSelect,
+  onOpenVariants,
+  onAddPhoto,
   showTextOnly = false,
   imageOnly = false,
   touchDelay = 0,
@@ -33,63 +41,67 @@ export const SymbolCard: React.FC<SymbolCardProps> = ({
     };
   }, []);
 
-  const catMeta = CATEGORY_LABELS[symbol.category] || {
-    color: 'bg-slate-50 text-slate-900 border-slate-200 dark:bg-slate-800 dark:text-slate-100 dark:border-slate-700',
-    badgeColor: 'bg-slate-100 text-slate-800',
-    swatch: 'bg-slate-400',
-  };
+  // Selalu tampilkan gambar dari penyimpanan lokal IndexedDB (blob: URL) atau data:image/ cadangan lokal.
+  // Jangan pernah memuat URL eksternal GitHub saat tampilan.
+  const resolvedImageSrc =
+    blobUrl ||
+    (symbol.customImageUrl && symbol.customImageUrl.startsWith('data:image/')
+      ? symbol.customImageUrl
+      : '');
+
+  const isPlaceholderCard = (!!symbol.isPlaceholder || symbol.source === 'placeholder') && !resolvedImageSrc;
+  const isTextFallbackCard = !resolvedImageSrc && !isPlaceholderCard;
+
+  const fitzStyle = symbol.fitzgeraldColor
+    ? FITZGERALD_COLOR_STYLES[symbol.fitzgeraldColor.toLowerCase()]
+    : undefined;
+
+  const cardStyleClass = isPlaceholderCard
+    ? 'bg-slate-100 hover:bg-slate-200/70 text-slate-900 border-dashed border-slate-300 dark:bg-slate-800/80 dark:hover:bg-slate-800 dark:text-slate-100 dark:border-slate-600'
+    : fitzStyle
+    ? fitzStyle.cardClass
+    : CATEGORY_LABELS[symbol.category]?.color ||
+      'bg-slate-50 text-slate-900 border-slate-300 dark:bg-slate-800 dark:text-slate-100 dark:border-slate-700';
 
   const sizeConfig = {
     2: {
       cardMinH: 'min-h-[140px] sm:min-h-[172px]',
-      iconSize: 'w-14 h-14 sm:w-20 sm:h-20',
       imgSize: 'w-20 h-20 sm:w-24 sm:h-24',
       textSize: 'text-lg sm:text-xl',
     },
     3: {
       cardMinH: 'min-h-[108px] sm:min-h-[132px]',
-      iconSize: 'w-11 h-11 sm:w-14 sm:h-14',
       imgSize: 'w-16 h-16 sm:w-20 sm:h-20',
       textSize: 'text-base sm:text-lg',
     },
     4: {
       cardMinH: 'min-h-[96px] sm:min-h-[116px]',
-      iconSize: 'w-9 h-9 sm:w-11 sm:h-11',
       imgSize: 'w-14 h-14 sm:w-16 sm:h-16',
       textSize: 'text-sm sm:text-base',
     },
     5: {
       cardMinH: 'min-h-[84px] sm:min-h-[100px]',
-      iconSize: 'w-8 h-8 sm:w-10 sm:h-10',
       imgSize: 'w-12 h-12 sm:w-14 sm:h-14',
       textSize: 'text-xs sm:text-sm',
     },
   }[gridSize] || {
     cardMinH: 'min-h-[108px] sm:min-h-[132px]',
-    iconSize: 'w-11 h-11 sm:w-14 sm:h-14',
     imgSize: 'w-16 h-16 sm:w-20 sm:h-20',
     textSize: 'text-base sm:text-lg',
   };
 
-  const renderIcon = () => {
-    if (symbol.customImageUrl) {
-      return (
-        <img
-          src={symbol.customImageUrl}
-          alt={symbol.label}
-          referrerPolicy="no-referrer"
-          className={`${sizeConfig.imgSize} object-cover rounded-xl mx-auto border border-black/10 dark:border-white/10`}
-        />
-      );
+  const renderVisual = () => {
+    if (!resolvedImageSrc) {
+      return null;
     }
 
-    const iconMap = Icons as unknown as Record<string, React.ElementType>;
-    const IconComponent = iconMap[symbol.iconName];
-    if (IconComponent) {
-      return <IconComponent className={`${sizeConfig.iconSize} mx-auto stroke-[1.75]`} />;
-    }
-
-    return <span className="text-4xl sm:text-5xl leading-none">{symbol.iconName || '⭐'}</span>;
+    return (
+      <img
+        src={resolvedImageSrc}
+        alt={symbol.label}
+        className={`${sizeConfig.imgSize} object-contain rounded-xl mx-auto`}
+      />
+    );
   };
 
   const triggerSelect = () => {
@@ -137,6 +149,8 @@ export const SymbolCard: React.FC<SymbolCardProps> = ({
     }, intervalTime);
   };
 
+  const visualNode = !showTextOnly ? renderVisual() : null;
+
   return (
     <div className="relative overflow-hidden rounded-2xl">
       <button
@@ -148,12 +162,21 @@ export const SymbolCard: React.FC<SymbolCardProps> = ({
         onMouseDown={handlePressStart}
         onMouseUp={clearDelayTimer}
         onMouseLeave={clearDelayTimer}
-        className={`w-full ${sizeConfig.cardMinH} px-3 py-3.5 flex flex-col items-center justify-center gap-2 rounded-2xl border-2 transition-transform duration-150 shadow-xs active:scale-[0.97] select-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-600 ${catMeta.color}`}
+        className={`w-full ${sizeConfig.cardMinH} px-3 ${
+          isPlaceholderCard && onAddPhoto ? 'pt-3.5 pb-11' : 'py-3.5'
+        } flex flex-col items-center justify-center gap-2 rounded-2xl border-2 transition-transform duration-150 shadow-xs active:scale-[0.97] select-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-600 ${cardStyleClass}`}
         style={{ touchAction: 'manipulation' }}
       >
-        {!showTextOnly && <div className="shrink-0">{renderIcon()}</div>}
-        {!imageOnly && (
-          <span className={`font-bold ${sizeConfig.textSize} text-center leading-snug line-clamp-2`}>
+        {visualNode && <div className="shrink-0">{visualNode}</div>}
+
+        {(!imageOnly || isPlaceholderCard || isTextFallbackCard || !visualNode) && (
+          <span
+            className={`font-bold ${
+              isPlaceholderCard || isTextFallbackCard
+                ? 'text-base sm:text-xl'
+                : sizeConfig.textSize
+            } text-center leading-snug line-clamp-2`}
+          >
             {symbol.label}
           </span>
         )}
@@ -167,6 +190,38 @@ export const SymbolCard: React.FC<SymbolCardProps> = ({
           </div>
         )}
       </button>
+
+      {hasVariants && onOpenVariants && (
+        <button
+          type="button"
+          onClick={e => {
+            e.stopPropagation();
+            onOpenVariants(symbol);
+          }}
+          title="Varian lain"
+          aria-label={`Pilih varian lain untuk ${symbol.label}`}
+          className="absolute top-1.5 right-1.5 min-w-[32px] min-h-[32px] px-2 py-1 rounded-lg bg-white/90 dark:bg-slate-900/90 border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-200 hover:bg-white dark:hover:bg-slate-800 shadow-xs flex items-center gap-1 text-[11px] font-semibold"
+          style={{ touchAction: 'manipulation' }}
+        >
+          <Layers className="w-3.5 h-3.5 shrink-0" />
+          <span className="hidden sm:inline">Varian</span>
+        </button>
+      )}
+
+      {isPlaceholderCard && onAddPhoto && (
+        <button
+          type="button"
+          onClick={e => {
+            e.stopPropagation();
+            onAddPhoto(symbol);
+          }}
+          className="absolute inset-x-2 bottom-2 min-h-[30px] px-2.5 py-1 rounded-xl bg-white/95 dark:bg-slate-900/95 border border-slate-300 dark:border-slate-600 text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 text-xs font-semibold flex items-center justify-center gap-1.5 shadow-xs"
+          style={{ touchAction: 'manipulation' }}
+        >
+          <Camera className="w-3.5 h-3.5 shrink-0" />
+          <span>Tambah foto</span>
+        </button>
+      )}
     </div>
   );
 };

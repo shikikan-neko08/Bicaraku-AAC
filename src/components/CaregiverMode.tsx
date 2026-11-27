@@ -1,8 +1,30 @@
-import React, { useState, useRef } from 'react';
-import { SymbolItem, AACProfile, UsageLog, FitzgeraldCategory, GridSize, AdaptiveSuggestion } from '../types';
+import React, { useState, useRef, useEffect } from 'react';
+import {
+  SymbolItem,
+  AACProfile,
+  UsageLog,
+  FitzgeraldCategory,
+  GridSize,
+  AdaptiveSuggestion,
+  FigurePreference,
+  ManifestMeta,
+  LicenseDocs,
+  SymbolUpdateDiffItem,
+  SyncSummary,
+  SyncDiagnostics,
+} from '../types';
+import { MANIFEST_URL, BUNDLED_SYMBOLS_VERSION } from '../config/symbolSource';
 import { CATEGORY_LABELS } from '../data/defaultSymbols';
 import { getAvailableVoices } from '../services/tts';
 import { encryptPin, decryptPin, EncryptedPinPayload } from '../services/crypto';
+import { sanitizeSvgText, MAX_SYMBOL_FILE_BYTES } from '../services/svgSanitizer';
+import { getLicenseDocs } from '../services/indexedDb';
+import {
+  checkForManifestUpdates,
+  applyManifestUpdates,
+  fetchAndStoreLicenseDocs,
+  ParsedManifestResult,
+} from '../services/symbolSync';
 import * as Icons from 'lucide-react';
 import {
   ArrowLeft,
@@ -25,42 +47,134 @@ import {
   Eye,
   EyeOff,
   Lock,
+  RefreshCw,
+  FileText,
+  Camera,
+  AlertCircle,
+  Activity,
+  RotateCcw,
 } from 'lucide-react';
 
 interface CaregiverModeProps {
   symbols: SymbolItem[];
-  onSaveSymbols: (symbols: SymbolItem[]) => void;
+  blobUrls: Record<string, string>;
+  onSaveSymbols: (symbols: SymbolItem[]) => Promise<void> | void;
+  onSaveSymbolPhoto: (symbolId: string, blob: Blob, markModified?: boolean) => Promise<void>;
+  onDeleteSymbol: (symbolId: string) => Promise<void>;
+  onSyncCompleted: (symbols: SymbolItem[], meta: ManifestMeta) => Promise<void>;
+  onRestartDownload: () => Promise<void> | void;
+  onResetBundledSymbols: (keepCaregiverSymbols: boolean) => Promise<void> | void;
   profile: AACProfile;
   onSaveProfile: (profile: AACProfile) => void;
   logs: UsageLog[];
   onClose: () => void;
   suggestions: AdaptiveSuggestion[];
+  manifestMeta: ManifestMeta | null;
+  diagnostics: SyncDiagnostics | null;
+  initialEditSymbolId?: string | null;
+  onClearInitialEditSymbol?: () => void;
+}
+
+async function prepareLocalImageBlob(file: File): Promise<{ ok: true; blob: Blob } | { ok: false; error: string }> {
+  const isSvg = file.type === 'image/svg+xml' || /\.svg$/i.test(file.name);
+  if (isSvg) {
+    const rawText = await file.text();
+    const sanitized = sanitizeSvgText(rawText);
+    if (!sanitized.ok) {
+      return { ok: false, error: sanitized.error };
+    }
+    return { ok: true, blob: sanitized.blob };
+  }
+
+  const allowedRaster = ['image/png', 'image/jpeg', 'image/jpg', 'image/webp', 'image/gif'];
+  if (!allowedRaster.includes(file.type) && !/\.(png|jpe?g|webp|gif)$/i.test(file.name)) {
+    return { ok: false, error: 'Gunakan berkas gambar PNG, JPG, WebP, GIF, atau SVG.' };
+  }
+
+  if (file.size <= MAX_SYMBOL_FILE_BYTES) {
+    return { ok: true, blob: file };
+  }
+
+  // Kompres gambar besar agar muat di bawah batas 500 KB saat disimpan di IndexedDB
+  return new Promise(resolve => {
+    const img = new Image();
+    const url = URL.createObjectURL(file);
+    img.onload = () => {
+      URL.revokeObjectURL(url);
+      const maxDim = 512;
+      const scale = Math.min(1, maxDim / Math.max(img.width, img.height));
+      const canvas = document.createElement('canvas');
+      canvas.width = Math.max(1, Math.round(img.width * scale));
+      canvas.height = Math.max(1, Math.round(img.height * scale));
+      const ctx = canvas.getContext('2d');
+      if (!ctx) {
+        resolve({ ok: false, error: 'Gagal memproses gambar.' });
+        return;
+      }
+      ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+      canvas.toBlob(
+        blob => {
+          if (!blob) {
+            resolve({ ok: false, error: 'Gagal mengonversi gambar.' });
+            return;
+          }
+          resolve({ ok: true, blob });
+        },
+        'image/webp',
+        0.85
+      );
+    };
+    img.onerror = () => {
+      URL.revokeObjectURL(url);
+      resolve({ ok: false, error: 'Berkas gambar tidak dapat dibaca.' });
+    };
+    img.src = url;
+  });
 }
 
 export const CaregiverMode: React.FC<CaregiverModeProps> = ({
   symbols,
+  blobUrls,
   onSaveSymbols,
+  onSaveSymbolPhoto,
+  onDeleteSymbol,
+  onSyncCompleted,
+  onRestartDownload,
+  onResetBundledSymbols,
   profile,
   onSaveProfile,
   logs,
   onClose,
   suggestions,
+  manifestMeta,
+  diagnostics,
+  initialEditSymbolId,
+  onClearInitialEditSymbol,
 }) => {
-  const [activeTab, setActiveTab] = useState<'symbols' | 'profile' | 'suggestions' | 'analytics' | 'backup'>('symbols');
+  const [activeTab, setActiveTab] = useState<
+    'symbols' | 'updates' | 'diagnostics' | 'profile' | 'licenses' | 'suggestions' | 'analytics' | 'backup'
+  >('symbols');
   const [editingSymbol, setEditingSymbol] = useState<SymbolItem | null>(null);
   const [isAddingNew, setIsAddingNew] = useState(false);
   const [currentProfile, setCurrentProfile] = useState<AACProfile>(profile);
   const [voices, setVoices] = useState<SpeechSynthesisVoice[]>([]);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
   const [symbolSearch, setSymbolSearch] = useState('');
-  const [symbolCatFilter, setSymbolCatFilter] = useState<FitzgeraldCategory | 'all'>('all');
+  const [symbolCatFilter, setSymbolCatFilter] = useState<string>('all');
+  const [onlyNeedPhoto, setOnlyNeedPhoto] = useState(false);
 
   // Form state for symbol add/edit
   const [formLabel, setFormLabel] = useState('');
   const [formSpokenText, setFormSpokenText] = useState('');
   const [formCategory, setFormCategory] = useState<FitzgeraldCategory>('nouns');
   const [formIconName, setFormIconName] = useState('Star');
-  const [formCustomImage, setFormCustomImage] = useState<string | undefined>(undefined);
+  const [formCustomImagePreview, setFormCustomImagePreview] = useState<string | undefined>(undefined);
+  const [pendingPhotoBlob, setPendingPhotoBlob] = useState<Blob | null>(null);
+  const [photoUploadError, setPhotoUploadError] = useState<string | null>(null);
+
+  // Quick photo upload target (untuk kartu "Perlu foto/simbol")
+  const quickPhotoInputRef = useRef<HTMLInputElement>(null);
+  const quickPhotoTargetRef = useRef<string | null>(null);
 
   // Change PIN form state
   const [oldPinInput, setOldPinInput] = useState('');
@@ -69,34 +183,66 @@ export const CaregiverMode: React.FC<CaregiverModeProps> = ({
   const [showPinDigits, setShowPinDigits] = useState(false);
   const [pinFormError, setPinFormError] = useState<string | null>(null);
 
+  // Manifest update checker state
+  const [isCheckingUpdates, setIsCheckingUpdates] = useState(false);
+  const [isApplyingUpdates, setIsApplyingUpdates] = useState(false);
+  const [updateError, setUpdateError] = useState<string | null>(null);
+  const [checkedManifest, setCheckedManifest] = useState<ParsedManifestResult | null>(null);
+  const [updateDiffs, setUpdateDiffs] = useState<SymbolUpdateDiffItem[]>([]);
+  const [updateCheckedOnce, setUpdateCheckedOnce] = useState(false);
+  const [lastAppliedSummary, setLastAppliedSummary] = useState<SyncSummary | null>(null);
+
+  // Diagnostics panel state
+  const [showResetConfirm, setShowResetConfirm] = useState(false);
+  const [isRunningDiagAction, setIsRunningDiagAction] = useState(false);
+
+  // License & Credits state
+  const [licenseDocs, setLicenseDocs] = useState<LicenseDocs | null>(null);
+  const [isRefreshingDocs, setIsRefreshingDocs] = useState(false);
+  const [auditFilter, setAuditFilter] = useState<'all' | 'restricted' | 'attribution'>('all');
+
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  React.useEffect(() => {
+  useEffect(() => {
     getAvailableVoices().then(v => setVoices(v));
+    getLicenseDocs().then(docs => setLicenseDocs(docs));
   }, []);
+
+  useEffect(() => {
+    if (initialEditSymbolId) {
+      const target = symbols.find(s => s.id === initialEditSymbolId);
+      if (target) {
+        setActiveTab('symbols');
+        handleOpenEdit(target);
+      }
+      onClearInitialEditSymbol?.();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialEditSymbolId]);
 
   const showNotification = (msg: string) => {
     setSuccessMessage(msg);
-    setTimeout(() => setSuccessMessage(null), 3000);
+    setTimeout(() => setSuccessMessage(null), 3500);
   };
 
   const renderSymbolPreview = (sym: SymbolItem) => {
-    if (sym.customImageUrl) {
-      return (
-        <img
-          src={sym.customImageUrl}
-          alt={sym.label}
-          referrerPolicy="no-referrer"
-          className="w-full h-full object-cover"
-        />
-      );
+    const src = blobUrls[sym.id] || sym.customImageUrl;
+    if (src) {
+      return <img src={src} alt={sym.label} className="w-full h-full object-contain p-1" />;
+    }
+    if (sym.isPlaceholder) {
+      return <Camera className="w-5 h-5 text-slate-400 dark:text-slate-500" />;
     }
     const iconMap = Icons as unknown as Record<string, React.ElementType>;
     const IconComp = iconMap[sym.iconName];
     if (IconComp) {
       return <IconComp className="w-6 h-6 text-slate-700 dark:text-slate-200" />;
     }
-    return <span className="text-lg font-bold text-slate-700 dark:text-slate-200">{sym.iconName || sym.label.slice(0, 2)}</span>;
+    return (
+      <span className="text-lg font-bold text-slate-700 dark:text-slate-200">
+        {sym.label.slice(0, 2)}
+      </span>
+    );
   };
 
   // Symbol CRUD handlers
@@ -106,71 +252,128 @@ export const CaregiverMode: React.FC<CaregiverModeProps> = ({
     setFormSpokenText('');
     setFormCategory('nouns');
     setFormIconName('Star');
-    setFormCustomImage(undefined);
+    setFormCustomImagePreview(undefined);
+    setPendingPhotoBlob(null);
+    setPhotoUploadError(null);
     setIsAddingNew(true);
   };
 
   const handleOpenEdit = (sym: SymbolItem) => {
     setEditingSymbol(sym);
     setFormLabel(sym.label);
-    setFormSpokenText(sym.spokenText || sym.label);
+    setFormSpokenText(sym.spokenText || sym.speechText || sym.label);
     setFormCategory(sym.category);
     setFormIconName(sym.iconName);
-    setFormCustomImage(sym.customImageUrl);
+    setFormCustomImagePreview(blobUrls[sym.id] || sym.customImageUrl);
+    setPendingPhotoBlob(null);
+    setPhotoUploadError(null);
     setIsAddingNew(true);
   };
 
-  const handleSaveSymbolSubmit = (e: React.FormEvent) => {
+  const handleSaveSymbolSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!formLabel.trim()) return;
 
+    const cleanLabel = formLabel.trim();
+    const cleanSpoken = formSpokenText.trim() || cleanLabel;
+
     if (editingSymbol) {
-      const updated = symbols.map(s =>
-        s.id === editingSymbol.id
-          ? {
-              ...s,
-              label: formLabel.trim(),
-              spokenText: formSpokenText.trim() || formLabel.trim(),
-              category: formCategory,
-              iconName: formIconName,
-              customImageUrl: formCustomImage,
-            }
-          : s
-      );
-      onSaveSymbols(updated);
-      showNotification('Simbol berhasil diperbarui.');
-    } else {
-      const newSym: SymbolItem = {
-        id: 'sym-' + Date.now(),
-        label: formLabel.trim(),
-        spokenText: formSpokenText.trim() || formLabel.trim(),
+      const nextBoardCategory =
+        formCategory !== editingSymbol.category
+          ? CATEGORY_LABELS[formCategory]?.label || editingSymbol.boardCategory
+          : editingSymbol.boardCategory;
+      const updatedSym: SymbolItem = {
+        ...editingSymbol,
+        label: cleanLabel,
+        spokenText: cleanSpoken,
+        speechText: cleanSpoken,
         category: formCategory,
+        boardCategory: nextBoardCategory,
         iconName: formIconName,
-        customImageUrl: formCustomImage,
+        userModified: true,
+        isPlaceholder: pendingPhotoBlob ? false : editingSymbol.isPlaceholder && !blobUrls[editingSymbol.id] && !editingSymbol.customImageUrl,
+        hasImageBlob: pendingPhotoBlob ? true : editingSymbol.hasImageBlob,
+        downloadStatus: pendingPhotoBlob ? 'done' : editingSymbol.downloadStatus,
+      };
+      const updatedList = symbols.map(s => (s.id === editingSymbol.id ? updatedSym : s));
+      await onSaveSymbols(updatedList);
+      if (pendingPhotoBlob) {
+        await onSaveSymbolPhoto(editingSymbol.id, pendingPhotoBlob, true);
+      }
+      showNotification('Simbol diperbarui dan ditandai sebagai perubahan caregiver.');
+    } else {
+      const newId = 'sym-' + Date.now();
+      const newSym: SymbolItem = {
+        id: newId,
+        filename: null,
+        label: cleanLabel,
+        spokenText: cleanSpoken,
+        speechText: cleanSpoken,
+        category: formCategory,
+        boardCategory: CATEGORY_LABELS[formCategory]?.label,
+        iconName: formIconName,
         isCustom: true,
+        isDefault: true,
+        isPlaceholder: !pendingPhotoBlob,
+        hasImageBlob: !!pendingPhotoBlob,
+        downloadStatus: pendingPhotoBlob ? 'done' : 'placeholder',
+        userModified: true,
+        source: pendingPhotoBlob ? 'custom-photo' : 'custom',
+        license: 'Pribadi (Lokal)',
+        author: currentProfile.userName || 'Caregiver',
+        commercialOk: true,
+        attributionRequired: false,
         frequency: 0,
       };
-      onSaveSymbols([newSym, ...symbols]);
-      showNotification('Simbol baru berhasil ditambahkan.');
+      await onSaveSymbols([newSym, ...symbols]);
+      if (pendingPhotoBlob) {
+        await onSaveSymbolPhoto(newId, pendingPhotoBlob, true);
+      }
+      showNotification('Simbol baru disimpan secara lokal.');
     }
+
+    setPendingPhotoBlob(null);
     setIsAddingNew(false);
   };
 
-  const handleDeleteSymbol = (id: string) => {
-    const updated = symbols.filter(s => s.id !== id);
-    onSaveSymbols(updated);
-    showNotification('Simbol dihapus.');
+  const handleDeleteSymbolClick = async (id: string) => {
+    await onDeleteSymbol(id);
+    showNotification('Simbol dihapus dari penyimpanan lokal.');
   };
 
-  const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
-    if (file) {
-      const reader = new FileReader();
-      reader.onload = () => {
-        setFormCustomImage(reader.result as string);
-      };
-      reader.readAsDataURL(file);
+    if (!file) return;
+    setPhotoUploadError(null);
+    const prepared = await prepareLocalImageBlob(file);
+    if (!prepared.ok) {
+      setPhotoUploadError(prepared.error);
+      return;
     }
+    setPendingPhotoBlob(prepared.blob);
+    const previewUrl = URL.createObjectURL(prepared.blob);
+    setFormCustomImagePreview(previewUrl);
+  };
+
+  const triggerQuickPhotoUpload = (symbolId: string) => {
+    quickPhotoTargetRef.current = symbolId;
+    quickPhotoInputRef.current?.click();
+  };
+
+  const handleQuickPhotoSelected = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    const targetId = quickPhotoTargetRef.current;
+    e.target.value = '';
+    if (!file || !targetId) return;
+
+    const prepared = await prepareLocalImageBlob(file);
+    if (!prepared.ok) {
+      showNotification(prepared.error);
+      return;
+    }
+
+    await onSaveSymbolPhoto(targetId, prepared.blob, true);
+    showNotification('Foto pribadi disimpan lokal di perangkat (tidak diunggah ke internet).');
   };
 
   // Profile Save
@@ -194,11 +397,11 @@ export const CaregiverMode: React.FC<CaregiverModeProps> = ({
   };
 
   // Apply adaptive suggestion (move symbol to front of board)
-  const handleApplySuggestion = (sugg: AdaptiveSuggestion) => {
+  const handleApplySuggestion = async (sugg: AdaptiveSuggestion) => {
     const target = symbols.find(s => s.id === sugg.symbolId);
     if (!target) return;
     const reordered = [target, ...symbols.filter(s => s.id !== sugg.symbolId)];
-    onSaveSymbols(reordered);
+    await onSaveSymbols(reordered);
     showNotification(`Simbol "${sugg.symbolLabel}" dipindahkan ke posisi utama.`);
   };
 
@@ -228,6 +431,82 @@ export const CaregiverMode: React.FC<CaregiverModeProps> = ({
     setNewPinInput('');
     setConfirmPinInput('');
     showNotification('PIN Caregiver berhasil diperbarui.');
+  };
+
+  // Manifest Update Check & Apply
+  const handleCheckUpdates = async () => {
+    setIsCheckingUpdates(true);
+    setUpdateError(null);
+    setLastAppliedSummary(null);
+    try {
+      const res = await checkForManifestUpdates(symbols);
+      setCheckedManifest(res.manifest);
+      setUpdateDiffs(res.diffs);
+      setUpdateCheckedOnce(true);
+    } catch (err: unknown) {
+      setUpdateError(
+        err instanceof Error
+          ? err.message
+          : 'Gagal memeriksa pembaruan dari repositori simbol.'
+      );
+    } finally {
+      setIsCheckingUpdates(false);
+    }
+  };
+
+  const handleSetDiffResolution = (id: string, resolution: 'keep_mine' | 'use_new') => {
+    setUpdateDiffs(prev =>
+      prev.map(d => (d.id === id ? { ...d, resolution } : d))
+    );
+  };
+
+  const handleConfirmApplyUpdates = async () => {
+    if (!checkedManifest) return;
+    setIsApplyingUpdates(true);
+    setUpdateError(null);
+    try {
+      const result = await applyManifestUpdates(
+        updateDiffs,
+        {
+          version: checkedManifest.version,
+          hash: checkedManifest.hash,
+          usedMirror: checkedManifest.usedMirror,
+        },
+        symbols
+      );
+      const docs = await getLicenseDocs();
+      setLicenseDocs(docs);
+      await onSyncCompleted(result.symbols, {
+        version: checkedManifest.version,
+        hash: checkedManifest.hash,
+        downloadedAt: Date.now(),
+        completedInit: true,
+        offlineTextFallback: false,
+        lastSummary: result.summary,
+      });
+      setLastAppliedSummary(result.summary);
+      setUpdateDiffs([]);
+      setCheckedManifest(null);
+      setUpdateCheckedOnce(false);
+      showNotification('Pembaruan simbol berhasil diterapkan secara lokal.');
+    } catch (err: unknown) {
+      setUpdateError(err instanceof Error ? err.message : 'Gagal menerapkan pembaruan simbol.');
+    } finally {
+      setIsApplyingUpdates(false);
+    }
+  };
+
+  const handleRefreshLicenseDocs = async () => {
+    setIsRefreshingDocs(true);
+    try {
+      const docs = await fetchAndStoreLicenseDocs();
+      setLicenseDocs(docs);
+      showNotification('Dokumen LICENSE-MULBERRY.txt dan CREDITS.md diperbarui.');
+    } catch {
+      showNotification('Gagal mengunduh dokumen lisensi. Pastikan internet aktif.');
+    } finally {
+      setIsRefreshingDocs(false);
+    }
   };
 
   // Backup & Restore (with AES-256-GCM encrypted PIN)
@@ -280,7 +559,7 @@ export const CaregiverMode: React.FC<CaregiverModeProps> = ({
       try {
         const parsed = JSON.parse(event.target?.result as string);
         if (parsed.symbols && Array.isArray(parsed.symbols)) {
-          onSaveSymbols(parsed.symbols);
+          await onSaveSymbols(parsed.symbols);
           if (parsed.profile) {
             const { encryptedPin, ...restProfile } = parsed.profile as Partial<AACProfile> & {
               encryptedPin?: EncryptedPinPayload;
@@ -302,7 +581,7 @@ export const CaregiverMode: React.FC<CaregiverModeProps> = ({
             setCurrentProfile(nextProfile);
             onSaveProfile(nextProfile);
           }
-          showNotification('Cadangan berhasil dipulihkan.');
+          showNotification('Cadangan berhasil dipulihkan ke IndexedDB.');
         }
       } catch {
         showNotification('Format file JSON tidak valid.');
@@ -311,12 +590,35 @@ export const CaregiverMode: React.FC<CaregiverModeProps> = ({
     reader.readAsText(file);
   };
 
+  // Daftar folder kategori unik (prioritaskan boardCategory dari manifest)
+  const availableFolderNames = Array.from(
+    new Set(
+      symbols.map(s => s.boardCategory?.trim() || CATEGORY_LABELS[s.category]?.label || s.category)
+    )
+  );
+
+  // Symbols needing photos (placeholder atau gambar belum terunduh)
+  const needPhotoSymbols = symbols.filter(
+    s =>
+      s.isPlaceholder ||
+      s.source === 'placeholder' ||
+      (!blobUrls[s.id] && !s.customImageUrl && s.source !== 'builtin-offline')
+  );
+
   // Filtered symbols for manager
   const filteredSymbols = symbols.filter(s => {
-    const matchCat = symbolCatFilter === 'all' || s.category === symbolCatFilter;
+    const folderName = s.boardCategory?.trim() || CATEGORY_LABELS[s.category]?.label || s.category;
+    const matchCat = symbolCatFilter === 'all' || folderName === symbolCatFilter;
     const matchSearch =
-      symbolSearch === '' || s.label.toLowerCase().includes(symbolSearch.toLowerCase());
-    return matchCat && matchSearch;
+      symbolSearch === '' ||
+      s.label.toLowerCase().includes(symbolSearch.toLowerCase()) ||
+      (s.speechText || '').toLowerCase().includes(symbolSearch.toLowerCase());
+    const matchNeedPhoto =
+      !onlyNeedPhoto ||
+      s.isPlaceholder ||
+      s.source === 'placeholder' ||
+      (!blobUrls[s.id] && !s.customImageUrl && s.source !== 'builtin-offline');
+    return matchCat && matchSearch && matchNeedPhoto;
   });
 
   // Analytics stats
@@ -325,8 +627,31 @@ export const CaregiverMode: React.FC<CaregiverModeProps> = ({
   const maxFreq = Math.max(1, ...mostUsed.map(s => s.frequency || 0));
   const unused = symbols.filter(s => (s.frequency || 0) === 0);
 
+  // License audit stats (placeholder tidak dihitung sebagai terbatas komersial)
+  const commercialCount = symbols.filter(s => s.commercialOk !== false).length;
+  const restrictedCount = symbols.filter(
+    s => s.commercialOk === false || (!s.license && !s.isPlaceholder && s.source !== 'placeholder' && !s.isCustom)
+  ).length;
+  const attributionCount = symbols.filter(s => s.attributionRequired === true).length;
+  const auditedSymbols = symbols.filter(s => {
+    if (auditFilter === 'restricted') {
+      return s.commercialOk === false || (!s.license && !s.isPlaceholder && s.source !== 'placeholder' && !s.isCustom);
+    }
+    if (auditFilter === 'attribution') return s.attributionRequired === true;
+    return true;
+  });
+
   return (
     <div className="fixed inset-0 z-40 bg-slate-50 dark:bg-slate-950 flex flex-col overflow-y-auto">
+      {/* Hidden Quick Photo Input for "Perlu foto/simbol" */}
+      <input
+        ref={quickPhotoInputRef}
+        type="file"
+        accept="image/*,.svg"
+        onChange={handleQuickPhotoSelected}
+        className="hidden"
+      />
+
       {/* Caregiver Header */}
       <header className="bg-white dark:bg-slate-900 border-b border-slate-200 dark:border-slate-800 px-4 sm:px-6 py-3.5 sticky top-0 z-20">
         <div className="max-w-7xl mx-auto flex items-center justify-between gap-4">
@@ -365,7 +690,10 @@ export const CaregiverMode: React.FC<CaregiverModeProps> = ({
           <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar">
             {[
               { id: 'symbols', label: 'Kelola Simbol', icon: ImageIcon },
+              { id: 'updates', label: 'Pembaruan Simbol', icon: RefreshCw },
+              { id: 'diagnostics', label: 'Diagnostik', icon: Activity },
               { id: 'profile', label: 'Profil & Suara', icon: Settings },
+              { id: 'licenses', label: 'Tentang & Lisensi', icon: FileText },
               { id: 'suggestions', label: 'Saran Adaptif', icon: Sparkles },
               { id: 'analytics', label: 'Analitik', icon: BarChart3 },
               { id: 'backup', label: 'Cadangan & Ekspor', icon: Download },
@@ -376,7 +704,7 @@ export const CaregiverMode: React.FC<CaregiverModeProps> = ({
                 <button
                   key={tab.id}
                   onClick={() => setActiveTab(tab.id as typeof activeTab)}
-                  className={`px-4 py-2 min-h-[42px] rounded-xl font-semibold text-sm flex items-center gap-2 shrink-0 whitespace-nowrap transition-colors ${
+                  className={`px-3.5 py-2 min-h-[42px] rounded-xl font-semibold text-sm flex items-center gap-2 shrink-0 whitespace-nowrap transition-colors ${
                     isActive
                       ? 'bg-slate-900 dark:bg-emerald-600 text-white shadow-xs'
                       : 'text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800'
@@ -393,7 +721,7 @@ export const CaregiverMode: React.FC<CaregiverModeProps> = ({
           <div className="flex items-center justify-between lg:justify-end gap-3 px-3 py-1.5 rounded-xl bg-slate-50 dark:bg-slate-800/80 border border-slate-200 dark:border-slate-700 shrink-0">
             <div className="flex items-center gap-2 text-xs sm:text-sm font-semibold text-slate-800 dark:text-slate-100">
               <Volume2 className="w-4 h-4 text-emerald-600 dark:text-emerald-400 shrink-0" />
-              <span className="whitespace-nowrap">Otomatis Bicara Saat Ditekan</span>
+              <span className="whitespace-nowrap">Otomatis Bicara</span>
             </div>
             <button
               type="button"
@@ -429,7 +757,7 @@ export const CaregiverMode: React.FC<CaregiverModeProps> = ({
                   Kelola Papan Simbol
                 </h2>
                 <p className="text-sm text-slate-500 dark:text-slate-400">
-                  Tambah, ubah, atau unggah foto pribadi untuk setiap simbol ({symbols.length} simbol).
+                  Foto pribadi disimpan hanya di perangkat Anda (IndexedDB) dan tidak pernah diunggah ke GitHub ({symbols.length} simbol).
                 </p>
               </div>
               <button
@@ -440,6 +768,62 @@ export const CaregiverMode: React.FC<CaregiverModeProps> = ({
                 <span>Tambah Simbol</span>
               </button>
             </div>
+
+            {/* Daftar "Perlu foto/simbol" */}
+            {needPhotoSymbols.length > 0 && (
+              <div className="bg-amber-50/80 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-900/70 rounded-2xl p-4 sm:p-5 space-y-3">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                  <div>
+                    <h3 className="font-bold text-sm sm:text-base text-amber-950 dark:text-amber-100 flex items-center gap-2">
+                      <Camera className="w-4 h-4 text-amber-700 dark:text-amber-300" />
+                      <span>Perlu foto/simbol ({needPhotoSymbols.length})</span>
+                    </h3>
+                    <p className="text-xs text-amber-800 dark:text-amber-200/80 mt-0.5">
+                      Entri placeholder atau simbol yang belum memiliki gambar. Anda dapat menambahkan foto lokal kapan saja.
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setOnlyNeedPhoto(v => !v)}
+                    className={`px-3.5 py-2 min-h-[38px] rounded-xl text-xs font-semibold border shrink-0 transition-colors ${
+                      onlyNeedPhoto
+                        ? 'bg-amber-700 text-white border-transparent'
+                        : 'bg-white dark:bg-slate-900 text-amber-900 dark:text-amber-100 border-amber-300 dark:border-amber-800'
+                    }`}
+                  >
+                    {onlyNeedPhoto ? 'Tampilkan Semua Simbol' : 'Filter Hanya Perlu Foto'}
+                  </button>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2.5 max-h-72 overflow-y-auto pr-1">
+                  {needPhotoSymbols.map(item => (
+                    <div
+                      key={item.id}
+                      className="flex items-center justify-between gap-2.5 bg-white dark:bg-slate-900 p-2.5 rounded-xl border border-amber-200/80 dark:border-amber-900/50"
+                    >
+                      <div className="min-w-0">
+                        <p className="text-sm font-bold text-slate-900 dark:text-white truncate">
+                          {item.label}
+                        </p>
+                        {item.placeholderNote && (
+                          <p className="text-[11px] text-slate-500 dark:text-slate-400 truncate">
+                            {item.placeholderNote}
+                          </p>
+                        )}
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => triggerQuickPhotoUpload(item.id)}
+                        className="px-2.5 py-1.5 min-h-[34px] rounded-lg bg-slate-900 dark:bg-emerald-600 text-white text-xs font-semibold flex items-center gap-1.5 shrink-0"
+                      >
+                        <Camera className="w-3.5 h-3.5" />
+                        <span>Tambah foto</span>
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
 
             {/* Search & Category Filter */}
             <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-3 bg-white dark:bg-slate-900 p-3 rounded-2xl border border-slate-200 dark:border-slate-800">
@@ -455,13 +839,13 @@ export const CaregiverMode: React.FC<CaregiverModeProps> = ({
               </div>
               <select
                 value={symbolCatFilter}
-                onChange={e => setSymbolCatFilter(e.target.value as FitzgeraldCategory | 'all')}
+                onChange={e => setSymbolCatFilter(e.target.value)}
                 className="min-h-[40px] px-3.5 py-2 rounded-xl bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-sm font-semibold text-slate-800 dark:text-slate-100"
               >
                 <option value="all">Semua Kategori</option>
-                {Object.entries(CATEGORY_LABELS).map(([key, val]) => (
-                  <option key={key} value={key}>
-                    {val.label}
+                {availableFolderNames.map(folder => (
+                  <option key={folder} value={folder}>
+                    {folder}
                   </option>
                 ))}
               </select>
@@ -474,6 +858,7 @@ export const CaregiverMode: React.FC<CaregiverModeProps> = ({
                   label: sym.category,
                   swatch: 'bg-slate-400',
                 };
+                const folderDisplay = sym.boardCategory?.trim() || catMeta.label;
                 return (
                   <div
                     key={sym.id}
@@ -484,15 +869,28 @@ export const CaregiverMode: React.FC<CaregiverModeProps> = ({
                         {renderSymbolPreview(sym)}
                       </div>
                       <div className="min-w-0 flex-1">
-                        <h3 className="font-bold text-slate-900 dark:text-white truncate">
-                          {sym.label}
-                        </h3>
+                        <div className="flex items-center gap-1.5">
+                          <h3 className="font-bold text-slate-900 dark:text-white truncate">
+                            {sym.label}
+                          </h3>
+                          {sym.userModified && (
+                            <span
+                              title="Diubah oleh caregiver — terlindungi dari timpa otomatis"
+                              className="text-[10px] font-semibold text-emerald-700 dark:text-emerald-300 shrink-0"
+                            >
+                              (Diedit)
+                            </span>
+                          )}
+                        </div>
                         <p className="text-xs text-slate-500 dark:text-slate-400 truncate mt-0.5">
-                          "{sym.spokenText || sym.label}"
+                          "{sym.spokenText || sym.speechText || sym.label}"
                         </p>
                         <div className="flex items-center gap-1.5 text-xs text-slate-500 dark:text-slate-400 mt-1">
                           <span className={`w-2 h-2 rounded-full ${catMeta.swatch}`} />
-                          <span>{catMeta.label}</span>
+                          <span className="truncate">{folderDisplay}</span>
+                          {sym.isDefault === false && (
+                            <span className="text-[11px] text-slate-400 shrink-0">· Varian</span>
+                          )}
                         </div>
                       </div>
                     </div>
@@ -505,7 +903,7 @@ export const CaregiverMode: React.FC<CaregiverModeProps> = ({
                         <Edit3 className="w-3.5 h-3.5" /> Ubah
                       </button>
                       <button
-                        onClick={() => handleDeleteSymbol(sym.id)}
+                        onClick={() => handleDeleteSymbolClick(sym.id)}
                         className="px-3 py-1.5 min-h-[36px] bg-rose-50 dark:bg-rose-950/50 hover:bg-rose-100 dark:hover:bg-rose-900/50 text-rose-700 dark:text-rose-300 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition-colors"
                       >
                         <Trash2 className="w-3.5 h-3.5" /> Hapus
@@ -518,6 +916,405 @@ export const CaregiverMode: React.FC<CaregiverModeProps> = ({
           </div>
         )}
 
+        {/* --- TAB: SYMBOL UPDATES --- */}
+        {activeTab === 'updates' && (
+          <div className="space-y-5 max-w-3xl">
+            <div className="bg-white dark:bg-slate-900 p-6 sm:p-8 rounded-2xl border border-slate-200 dark:border-slate-800 space-y-5">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                <div>
+                  <h2 className="text-xl font-extrabold text-slate-900 dark:text-white">
+                    Perbarui Simbol Bawaan
+                  </h2>
+                  <p className="text-sm text-slate-500 dark:text-slate-400 mt-0.5">
+                    Aplikasi tidak memanggil GitHub otomatis setelah sinkronisasi awal. Tekan tombol di bawah untuk memeriksa pembaruan manifest secara manual.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  disabled={isCheckingUpdates}
+                  onClick={handleCheckUpdates}
+                  className="px-5 py-2.5 min-h-[46px] bg-blue-600 hover:bg-blue-700 disabled:opacity-60 text-white font-bold rounded-xl text-sm flex items-center justify-center gap-2 shrink-0 whitespace-nowrap transition-colors"
+                >
+                  <RefreshCw className="w-4 h-4" />
+                  <span>{isCheckingUpdates ? 'Memeriksa...' : 'Periksa pembaruan simbol'}</span>
+                </button>
+              </div>
+
+              {manifestMeta && (
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 p-4 rounded-xl bg-slate-50 dark:bg-slate-800/70 border border-slate-200 dark:border-slate-700 text-xs">
+                  <div>
+                    <span className="text-slate-500 dark:text-slate-400 block">Hash Manifest Tersimpan</span>
+                    <span className="font-bold text-slate-900 dark:text-white tabular-nums font-mono">
+                      {manifestMeta.hash ? manifestMeta.hash.slice(0, 12) : manifestMeta.version || '-'}
+                    </span>
+                  </div>
+                  <div>
+                    <span className="text-slate-500 dark:text-slate-400 block">Terakhir Diunduh</span>
+                    <span className="font-bold text-slate-900 dark:text-white">
+                      {manifestMeta.downloadedAt
+                        ? new Date(manifestMeta.downloadedAt).toLocaleString('id-ID')
+                        : '-'}
+                    </span>
+                  </div>
+                  <div>
+                    <span className="text-slate-500 dark:text-slate-400 block">Status Lokal</span>
+                    <span className="font-bold text-emerald-700 dark:text-emerald-300">
+                      {manifestMeta.completedInit ? 'Siap Offline (IndexedDB)' : 'Mode Teks Offline'}
+                    </span>
+                  </div>
+                </div>
+              )}
+
+              {updateError && (
+                <div className="p-4 rounded-xl bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-800 text-sm text-rose-700 dark:text-rose-200 flex items-start gap-2.5">
+                  <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+                  <span>{updateError}</span>
+                </div>
+              )}
+
+              {lastAppliedSummary && (
+                <div className="p-4 rounded-xl bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-800 text-sm text-emerald-800 dark:text-emerald-200">
+                  Pembaruan selesai: {lastAppliedSummary.succeeded} gambar berhasil diunduh,{' '}
+                  {lastAppliedSummary.failed} gagal, {lastAppliedSummary.placeholders} placeholder.
+                </div>
+              )}
+
+              {updateCheckedOnce && updateDiffs.length === 0 && (
+                <div className="p-5 rounded-xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-700 text-sm text-slate-700 dark:text-slate-200">
+                  Semua simbol sudah sama dengan manifest terbaru di repositori (hash:{' '}
+                  <span className="font-mono font-semibold">{checkedManifest?.hash.slice(0, 12)}</span>).
+                </div>
+              )}
+
+              {updateDiffs.length > 0 && (
+                <div className="space-y-4">
+                  <div className="flex items-center justify-between">
+                    <h3 className="font-bold text-base text-slate-900 dark:text-white">
+                      Daftar Perubahan ({updateDiffs.length})
+                    </h3>
+                    <span className="text-xs text-slate-500 dark:text-slate-400">
+                      Simbol yang diubah caregiver default dipertahankan.
+                    </span>
+                  </div>
+
+                  <div className="space-y-2.5 max-h-96 overflow-y-auto pr-1">
+                    {updateDiffs.map(diff => (
+                      <div
+                        key={diff.id}
+                        className="p-4 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50/70 dark:bg-slate-800/50 flex flex-col sm:flex-row sm:items-center justify-between gap-3"
+                      >
+                        <div className="space-y-1">
+                          <div className="flex items-center gap-2">
+                            <span
+                              className={`text-xs font-bold ${
+                                diff.type === 'added'
+                                  ? 'text-emerald-700 dark:text-emerald-300'
+                                  : diff.type === 'removed'
+                                  ? 'text-rose-700 dark:text-rose-300'
+                                  : 'text-blue-700 dark:text-blue-300'
+                              }`}
+                            >
+                              {diff.type === 'added'
+                                ? '[BARU]'
+                                : diff.type === 'removed'
+                                ? '[DIHAPUS]'
+                                : '[BERUBAH]'}
+                            </span>
+                            <span className="font-bold text-sm text-slate-900 dark:text-white">
+                              {diff.label}
+                            </span>
+                            {diff.userModified && (
+                              <span className="text-xs font-semibold text-amber-700 dark:text-amber-300">
+                                · Diubah caregiver
+                              </span>
+                            )}
+                          </div>
+                          {diff.type === 'changed' && diff.incoming && diff.existing && (
+                            <p className="text-xs text-slate-500 dark:text-slate-400">
+                              Versi Anda: "{diff.existing.label}" → Versi Baru: "{diff.incoming.label}"
+                            </p>
+                          )}
+                        </div>
+
+                        <div className="flex items-center gap-2 shrink-0">
+                          {diff.userModified ? (
+                            <span className="px-3 py-1.5 min-h-[36px] rounded-lg text-xs font-semibold bg-amber-100 dark:bg-amber-950/60 text-amber-900 dark:text-amber-200 border border-amber-300 dark:border-amber-800 flex items-center">
+                              Dilindungi (Pertahankan versi saya)
+                            </span>
+                          ) : (
+                            <>
+                              <button
+                                type="button"
+                                onClick={() => handleSetDiffResolution(diff.id, 'keep_mine')}
+                                className={`px-3 py-1.5 min-h-[36px] rounded-lg text-xs font-semibold border transition-colors ${
+                                  diff.resolution === 'keep_mine'
+                                    ? 'bg-slate-900 dark:bg-slate-700 text-white border-transparent'
+                                    : 'bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-300 border-slate-200 dark:border-slate-700'
+                                }`}
+                              >
+                                Pertahankan versi saya
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => handleSetDiffResolution(diff.id, 'use_new')}
+                                className={`px-3 py-1.5 min-h-[36px] rounded-lg text-xs font-semibold border transition-colors ${
+                                  diff.resolution === 'use_new'
+                                    ? 'bg-emerald-600 text-white border-transparent'
+                                    : 'bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-300 border-slate-200 dark:border-slate-700'
+                                }`}
+                              >
+                                {diff.type === 'removed' ? 'Hapus sesuai manifest' : 'Pakai versi baru'}
+                              </button>
+                            </>
+                          )}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+
+                  <button
+                    type="button"
+                    disabled={isApplyingUpdates}
+                    onClick={handleConfirmApplyUpdates}
+                    className="w-full min-h-[48px] py-3 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-60 text-white font-bold rounded-xl text-sm transition-colors"
+                  >
+                    {isApplyingUpdates ? 'Menerapkan pembaruan...' : 'Konfirmasi & Terapkan Pembaruan'}
+                  </button>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* --- TAB: PANEL DIAGNOSTIK --- */}
+        {activeTab === 'diagnostics' && (() => {
+          const liveSucceeded = symbols.filter(
+            s => !s.isPlaceholder && s.source !== 'legacy-seed' && (s.downloadStatus === 'done' || !!blobUrls[s.id])
+          ).length;
+          const liveFailed = symbols.filter(
+            s => !s.isPlaceholder && s.downloadStatus === 'failed'
+          ).length;
+          const livePlaceholders = symbols.filter(
+            s => s.isPlaceholder || !s.filename
+          ).length;
+
+          const diagStatus = diagnostics?.status || (manifestMeta?.completedInit ? 'completed' : 'idle');
+          const statusLabels: Record<string, { text: string; cls: string }> = {
+            idle: {
+              text: 'Belum mulai',
+              cls: 'bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-200 border-slate-200 dark:border-slate-700',
+            },
+            running: {
+              text: 'Berjalan',
+              cls: 'bg-blue-50 text-blue-700 dark:bg-blue-950/60 dark:text-blue-200 border-blue-200 dark:border-blue-800',
+            },
+            completed: {
+              text: 'Selesai',
+              cls: 'bg-emerald-50 text-emerald-700 dark:bg-emerald-950/60 dark:text-emerald-200 border-emerald-200 dark:border-emerald-800',
+            },
+            failed: {
+              text: 'Gagal',
+              cls: 'bg-rose-50 text-rose-700 dark:bg-rose-950/60 dark:text-rose-200 border-rose-200 dark:border-rose-800',
+            },
+          };
+          const statusMeta = statusLabels[diagStatus] || statusLabels.idle;
+          const errorList = diagnostics?.errors || [];
+
+          return (
+            <div className="space-y-5 max-w-4xl">
+              <div className="bg-white dark:bg-slate-900 p-6 sm:p-8 rounded-2xl border border-slate-200 dark:border-slate-800 space-y-5">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                  <div>
+                    <h2 className="text-xl font-extrabold text-slate-900 dark:text-white">
+                      Panel Diagnostik Sinkronisasi Simbol
+                    </h2>
+                    <p className="text-sm text-slate-500 dark:text-slate-400 mt-0.5">
+                      Pantau sumber manifest GitHub, status penyimpanan IndexedDB, dan log galat unduhan.
+                    </p>
+                  </div>
+                  <span
+                    className={`px-3.5 py-1.5 rounded-xl text-xs font-bold border self-start sm:self-auto ${statusMeta.cls}`}
+                  >
+                    Status: {statusMeta.text}
+                  </span>
+                </div>
+
+                {/* Manifest URL & Schema Version */}
+                <div className="p-4 rounded-xl bg-slate-50 dark:bg-slate-800/70 border border-slate-200 dark:border-slate-700 space-y-2 text-xs">
+                  <div>
+                    <span className="text-slate-500 dark:text-slate-400 font-semibold block">
+                      MANIFEST_URL
+                    </span>
+                    <code className="font-mono text-slate-900 dark:text-slate-100 break-all">
+                      {diagnostics?.manifestUrl || MANIFEST_URL}
+                    </code>
+                  </div>
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 pt-2 border-t border-slate-200/70 dark:border-slate-700/70">
+                    <div>
+                      <span className="text-slate-500 dark:text-slate-400 block">Versi Bundel Simbol</span>
+                      <span className="font-mono font-bold text-slate-900 dark:text-white">
+                        {manifestMeta?.bundledSymbolsVersion || 'Belum bermigrasi'} (target: {BUNDLED_SYMBOLS_VERSION})
+                      </span>
+                    </div>
+                    <div>
+                      <span className="text-slate-500 dark:text-slate-400 block">Hash Manifest</span>
+                      <span className="font-mono font-bold text-slate-900 dark:text-white">
+                        {manifestMeta?.hash ? manifestMeta.hash.slice(0, 12) : '-'}
+                      </span>
+                    </div>
+                    <div>
+                      <span className="text-slate-500 dark:text-slate-400 block">Pembaruan Terakhir</span>
+                      <span className="font-bold text-slate-900 dark:text-white">
+                        {diagnostics?.updatedAt
+                          ? new Date(diagnostics.updatedAt).toLocaleString('id-ID')
+                          : manifestMeta?.downloadedAt
+                          ? new Date(manifestMeta.downloadedAt).toLocaleString('id-ID')
+                          : '-'}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Live Counts */}
+                <div className="grid grid-cols-3 gap-3 text-center">
+                  <div className="p-4 rounded-xl bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-800/70">
+                    <span className="text-xs font-semibold text-emerald-800 dark:text-emerald-300 block">
+                      Gambar Tersimpan
+                    </span>
+                    <span className="text-2xl font-extrabold tabular-nums text-emerald-700 dark:text-emerald-200">
+                      {liveSucceeded}
+                    </span>
+                  </div>
+                  <div className="p-4 rounded-xl bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-800/70">
+                    <span className="text-xs font-semibold text-rose-800 dark:text-rose-300 block">
+                      Gagal
+                    </span>
+                    <span className="text-2xl font-extrabold tabular-nums text-rose-700 dark:text-rose-200">
+                      {liveFailed}
+                    </span>
+                  </div>
+                  <div className="p-4 rounded-xl bg-slate-100 dark:bg-slate-800 border border-slate-200 dark:border-slate-700">
+                    <span className="text-xs font-semibold text-slate-600 dark:text-slate-300 block">
+                      Placeholder
+                    </span>
+                    <span className="text-2xl font-extrabold tabular-nums text-slate-800 dark:text-slate-100">
+                      {livePlaceholders}
+                    </span>
+                  </div>
+                </div>
+
+                {diagnostics?.lastErrorMessage && (
+                  <div className="p-4 rounded-xl bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-800 text-xs sm:text-sm text-rose-700 dark:text-rose-200 flex items-start gap-2.5">
+                    <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+                    <span>{diagnostics.lastErrorMessage}</span>
+                  </div>
+                )}
+
+                {/* Action Buttons */}
+                <div className="flex flex-col sm:flex-row gap-3">
+                  <button
+                    type="button"
+                    disabled={isRunningDiagAction}
+                    onClick={async () => {
+                      setIsRunningDiagAction(true);
+                      try {
+                        await onRestartDownload();
+                      } finally {
+                        setIsRunningDiagAction(false);
+                      }
+                    }}
+                    className="flex-1 min-h-[46px] px-5 py-2.5 bg-blue-600 hover:bg-blue-700 disabled:opacity-60 text-white font-bold rounded-xl text-sm flex items-center justify-center gap-2 transition-colors"
+                  >
+                    <RefreshCw className="w-4 h-4" />
+                    <span>Mulai ulang unduhan</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    disabled={isRunningDiagAction}
+                    onClick={() => setShowResetConfirm(true)}
+                    className="flex-1 min-h-[46px] px-5 py-2.5 bg-rose-50 dark:bg-rose-950/50 hover:bg-rose-100 dark:hover:bg-rose-900/60 text-rose-700 dark:text-rose-200 border border-rose-200 dark:border-rose-800 font-bold rounded-xl text-sm flex items-center justify-center gap-2 transition-colors"
+                  >
+                    <RotateCcw className="w-4 h-4" />
+                    <span>Reset simbol bawaan</span>
+                  </button>
+                </div>
+
+                {showResetConfirm && (
+                  <div className="p-4 rounded-xl bg-amber-50 dark:bg-amber-950/40 border border-amber-300 dark:border-amber-800 space-y-3">
+                    <p className="text-sm font-bold text-amber-950 dark:text-amber-100">
+                      Konfirmasi Reset Simbol Bawaan
+                    </p>
+                    <p className="text-xs text-amber-900 dark:text-amber-200/90">
+                      Seluruh cache simbol bawaan di IndexedDB akan dihapus dan diunduh ulang dari MANIFEST_URL. Foto pribadi dan label yang Anda ubah sebagai caregiver tetap dipertahankan.
+                    </p>
+                    <div className="flex flex-wrap gap-2">
+                      <button
+                        type="button"
+                        disabled={isRunningDiagAction}
+                        onClick={async () => {
+                          setIsRunningDiagAction(true);
+                          setShowResetConfirm(false);
+                          try {
+                            await onResetBundledSymbols(true);
+                          } finally {
+                            setIsRunningDiagAction(false);
+                          }
+                        }}
+                        className="px-4 py-2 min-h-[38px] bg-rose-700 hover:bg-rose-800 text-white text-xs font-bold rounded-lg transition-colors"
+                      >
+                        Ya, Reset & Unduh Ulang
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setShowResetConfirm(false)}
+                        className="px-4 py-2 min-h-[38px] bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-200 border border-slate-200 dark:border-slate-700 text-xs font-semibold rounded-lg"
+                      >
+                        Batal
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                {/* Error & Attempted URL List */}
+                <div className="space-y-2.5">
+                  <h3 className="text-sm font-bold text-slate-900 dark:text-white">
+                    Daftar Galat & URL yang Dicoba ({errorList.length})
+                  </h3>
+                  {errorList.length === 0 ? (
+                    <div className="p-4 rounded-xl bg-slate-50 dark:bg-slate-800/50 border border-slate-200 dark:border-slate-700 text-xs text-slate-600 dark:text-slate-300">
+                      Tidak ada galat unduhan. Detail setiap permintaan jaringan juga dicatat di Console browser (`[BicaraKu Sync]`).
+                    </div>
+                  ) : (
+                    <div className="max-h-72 overflow-y-auto space-y-2 pr-1">
+                      {errorList.map((err, i) => (
+                        <div
+                          key={`${err.id}-${i}`}
+                          className="p-3 rounded-xl bg-rose-50/70 dark:bg-rose-950/30 border border-rose-200 dark:border-rose-900/70 text-xs space-y-1"
+                        >
+                          <div className="flex items-center justify-between gap-2">
+                            <span className="font-bold text-slate-900 dark:text-white">
+                              {err.label}
+                            </span>
+                            <span className="text-rose-700 dark:text-rose-300 font-semibold">
+                              {err.reason}
+                            </span>
+                          </div>
+                          {err.attemptedUrl && (
+                            <p className="font-mono text-[11px] text-slate-600 dark:text-slate-300 break-all">
+                              URL: {err.attemptedUrl}
+                            </p>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
+          );
+        })()}
+
         {/* --- TAB 2: PROFILE & SPEECH SETTINGS --- */}
         {activeTab === 'profile' && (
           <div className="max-w-2xl bg-white dark:bg-slate-900 p-6 sm:p-8 rounded-2xl border border-slate-200 dark:border-slate-800">
@@ -525,7 +1322,7 @@ export const CaregiverMode: React.FC<CaregiverModeProps> = ({
               Profil, Suara & Aksesibilitas
             </h2>
             <p className="text-sm text-slate-500 dark:text-slate-400 mb-6">
-              Sesuaikan suara TTS, kecepatan bicara, toleransi sentuhan, dan keamanan PIN.
+              Sesuaikan suara TTS, preferensi figur, mode lisensi aman, dan keamanan PIN.
             </p>
 
             <form onSubmit={handleSaveProfileSubmit} className="space-y-5">
@@ -539,6 +1336,76 @@ export const CaregiverMode: React.FC<CaregiverModeProps> = ({
                   onChange={e => setCurrentProfile({ ...currentProfile, userName: e.target.value })}
                   className="w-full min-h-[44px] px-4 py-2.5 rounded-xl bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-sm text-slate-900 dark:text-white"
                 />
+              </div>
+
+              <div>
+                <label className="block text-sm font-semibold text-slate-700 dark:text-slate-200 mb-1.5">
+                  Preferensi Figur Simbol
+                </label>
+                <p className="text-xs text-slate-500 dark:text-slate-400 mb-2">
+                  Memilih varian figur wanita atau pria secara otomatis bila tersedia di grup varian simbol.
+                </p>
+                <div className="grid grid-cols-3 gap-2">
+                  {(
+                    [
+                      { id: 'all', label: 'Default / Semua' },
+                      { id: 'female', label: 'Figur Wanita' },
+                      { id: 'male', label: 'Figur Pria' },
+                    ] as const
+                  ).map(opt => (
+                    <button
+                      type="button"
+                      key={opt.id}
+                      onClick={() =>
+                        setCurrentProfile({
+                          ...currentProfile,
+                          figurePreference: opt.id as FigurePreference,
+                        })
+                      }
+                      className={`px-3 py-2.5 min-h-[42px] rounded-xl text-xs sm:text-sm font-semibold border transition-colors ${
+                        (currentProfile.figurePreference || 'all') === opt.id
+                          ? 'bg-slate-900 dark:bg-emerald-600 text-white border-transparent'
+                          : 'bg-slate-50 dark:bg-slate-800 text-slate-700 dark:text-slate-300 border-slate-200 dark:border-slate-700'
+                      }`}
+                    >
+                      {opt.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div className="flex items-center justify-between gap-4 p-4 rounded-xl bg-slate-50 dark:bg-slate-800/70 border border-slate-200 dark:border-slate-700">
+                <div className="space-y-0.5">
+                  <span className="font-bold text-sm text-slate-900 dark:text-white block">
+                    Mode Lisensi Aman
+                  </span>
+                  <span className="text-xs text-slate-500 dark:text-slate-400 block">
+                    Menyembunyikan simbol yang dibatasi non-komersial atau tanpa keterangan lisensi jelas.
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={currentProfile.safeLicenseMode}
+                  onClick={() =>
+                    setCurrentProfile({
+                      ...currentProfile,
+                      safeLicenseMode: !currentProfile.safeLicenseMode,
+                    })
+                  }
+                  className={`relative inline-flex h-7 w-12 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-150 ${
+                    currentProfile.safeLicenseMode
+                      ? 'bg-emerald-600'
+                      : 'bg-slate-300 dark:bg-slate-600'
+                  }`}
+                >
+                  <span
+                    aria-hidden="true"
+                    className={`pointer-events-none inline-block h-6 w-6 rounded-full bg-white shadow-sm transition-transform duration-150 ${
+                      currentProfile.safeLicenseMode ? 'translate-x-5' : 'translate-x-0'
+                    }`}
+                  />
+                </button>
               </div>
 
               <div>
@@ -810,6 +1677,154 @@ export const CaregiverMode: React.FC<CaregiverModeProps> = ({
           </div>
         )}
 
+        {/* --- TAB: TENTANG, KREDIT & AUDIT LISENSI --- */}
+        {activeTab === 'licenses' && (
+          <div className="space-y-6 max-w-4xl">
+            {/* Tentang & Kredit */}
+            <div className="bg-white dark:bg-slate-900 p-6 sm:p-8 rounded-2xl border border-slate-200 dark:border-slate-800 space-y-5">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                <div>
+                  <h2 className="text-xl font-extrabold text-slate-900 dark:text-white">
+                    Tentang & Kredit Simbol
+                  </h2>
+                  <p className="text-sm text-slate-500 dark:text-slate-400 mt-0.5">
+                    BicaraKu (GPLv3) menggunakan simbol bawaan Mulberry Symbols — Steve Lee (mulberrysymbols.org), berlisensi CC BY-SA 4.0.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  disabled={isRefreshingDocs}
+                  onClick={handleRefreshLicenseDocs}
+                  className="px-4 py-2 min-h-[40px] rounded-xl bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-800 dark:text-slate-100 text-xs font-semibold flex items-center gap-2 shrink-0"
+                >
+                  <RefreshCw className="w-3.5 h-3.5" />
+                  <span>{isRefreshingDocs ? 'Memuat...' : 'Muat ulang dokumen lisensi'}</span>
+                </button>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div className="space-y-2">
+                  <h3 className="text-xs font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400">
+                    LICENSE-MULBERRY.txt
+                  </h3>
+                  <pre className="p-3.5 rounded-xl bg-slate-50 dark:bg-slate-800/80 border border-slate-200 dark:border-slate-700 text-xs text-slate-700 dark:text-slate-200 whitespace-pre-wrap max-h-56 overflow-y-auto font-mono">
+                    {licenseDocs?.licenseMulberryText ||
+                      'Mulberry Symbols — Copyright Steve Lee (mulberrysymbols.org).\nCreative Commons Attribution-ShareAlike 4.0 (CC BY-SA 4.0).'}
+                  </pre>
+                </div>
+
+                <div className="space-y-2">
+                  <h3 className="text-xs font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400">
+                    CREDITS.md
+                  </h3>
+                  <pre className="p-3.5 rounded-xl bg-slate-50 dark:bg-slate-800/80 border border-slate-200 dark:border-slate-700 text-xs text-slate-700 dark:text-slate-200 whitespace-pre-wrap max-h-56 overflow-y-auto font-mono">
+                    {licenseDocs?.creditsMdText ||
+                      'Kredit Simbol:\n- Mulberry Symbols oleh Steve Lee (https://mulberrysymbols.org) — CC BY-SA 4.0.'}
+                  </pre>
+                </div>
+              </div>
+            </div>
+
+            {/* Audit Lisensi */}
+            <div className="bg-white dark:bg-slate-900 p-6 sm:p-8 rounded-2xl border border-slate-200 dark:border-slate-800 space-y-5">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                <div>
+                  <h2 className="text-xl font-extrabold text-slate-900 dark:text-white">
+                    Audit Lisensi Simbol
+                  </h2>
+                  <p className="text-sm text-slate-500 dark:text-slate-400">
+                    Mode Lisensi Aman saat ini:{' '}
+                    <span className="font-bold text-slate-900 dark:text-white">
+                      {currentProfile.safeLicenseMode ? 'Aktif (simbol terbatas disembunyikan)' : 'Nonaktif'}
+                    </span>
+                  </p>
+                </div>
+
+                <div className="flex items-center gap-1.5">
+                  {[
+                    { id: 'all', label: `Semua (${symbols.length})` },
+                    { id: 'attribution', label: `Atribusi (${attributionCount})` },
+                    { id: 'restricted', label: `Terbatas (${restrictedCount})` },
+                  ].map(f => (
+                    <button
+                      key={f.id}
+                      type="button"
+                      onClick={() => setAuditFilter(f.id as typeof auditFilter)}
+                      className={`px-3 py-1.5 min-h-[36px] rounded-xl text-xs font-semibold ${
+                        auditFilter === f.id
+                          ? 'bg-slate-900 dark:bg-emerald-600 text-white'
+                          : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300'
+                      }`}
+                    >
+                      {f.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div className="grid grid-cols-3 gap-3 text-center">
+                <div className="p-3 rounded-xl bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700">
+                  <span className="text-xs text-slate-500 dark:text-slate-400 block">Komersial OK</span>
+                  <span className="text-xl font-extrabold tabular-nums text-emerald-600 dark:text-emerald-400">
+                    {commercialCount}
+                  </span>
+                </div>
+                <div className="p-3 rounded-xl bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700">
+                  <span className="text-xs text-slate-500 dark:text-slate-400 block">Butuh Atribusi</span>
+                  <span className="text-xl font-extrabold tabular-nums text-blue-600 dark:text-blue-400">
+                    {attributionCount}
+                  </span>
+                </div>
+                <div className="p-3 rounded-xl bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700">
+                  <span className="text-xs text-slate-500 dark:text-slate-400 block">Non-Komersial / Kosong</span>
+                  <span className="text-xl font-extrabold tabular-nums text-amber-600 dark:text-amber-400">
+                    {restrictedCount}
+                  </span>
+                </div>
+              </div>
+
+              <div className="overflow-x-auto border border-slate-200 dark:border-slate-800 rounded-xl">
+                <table className="w-full text-left text-xs">
+                  <thead className="bg-slate-50 dark:bg-slate-800/80 text-slate-600 dark:text-slate-300">
+                    <tr>
+                      <th className="py-2.5 px-3 font-semibold">Simbol</th>
+                      <th className="py-2.5 px-3 font-semibold">Sumber</th>
+                      <th className="py-2.5 px-3 font-semibold">Lisensi</th>
+                      <th className="py-2.5 px-3 font-semibold">Pembuat</th>
+                      <th className="py-2.5 px-3 font-semibold">Komersial</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
+                    {auditedSymbols.slice(0, 120).map(sym => (
+                      <tr key={sym.id} className="bg-white dark:bg-slate-900">
+                        <td className="py-2 px-3 font-semibold text-slate-900 dark:text-white">
+                          {sym.label}
+                        </td>
+                        <td className="py-2 px-3 text-slate-600 dark:text-slate-300">
+                          {sym.source || 'mulberry'}
+                        </td>
+                        <td className="py-2 px-3 text-slate-600 dark:text-slate-300">
+                          {sym.license || '-'}
+                        </td>
+                        <td className="py-2 px-3 text-slate-600 dark:text-slate-300">
+                          {sym.author || '-'}
+                        </td>
+                        <td className="py-2 px-3">
+                          {sym.commercialOk === false ? (
+                            <span className="text-rose-600 dark:text-rose-400 font-semibold">Tidak</span>
+                          ) : (
+                            <span className="text-emerald-600 dark:text-emerald-400 font-semibold">Ya</span>
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        )}
+
         {/* --- TAB 3: ADAPTIVE SUGGESTIONS --- */}
         {activeTab === 'suggestions' && (
           <div className="space-y-5 max-w-3xl">
@@ -977,7 +1992,7 @@ export const CaregiverMode: React.FC<CaregiverModeProps> = ({
                     Ekspor Papan Simbol (JSON)
                   </h3>
                   <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
-                    Cadangkan simbol, foto, profil, dan riwayat. PIN Caregiver dienkripsi otomatis dengan AES-256-GCM.
+                    Cadangkan simbol, profil, dan riwayat. PIN Caregiver dienkripsi otomatis dengan AES-256-GCM.
                   </p>
                 </div>
                 <button
@@ -1072,25 +2087,29 @@ export const CaregiverMode: React.FC<CaregiverModeProps> = ({
 
               <div>
                 <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1.5">
-                  Foto Pribadi (Opsional)
+                  Foto Pribadi Lokal (Disimpan di IndexedDB, tidak pernah diunggah)
                 </label>
                 <div className="flex items-center gap-3">
-                  {formCustomImage && (
+                  {formCustomImagePreview && (
                     <img
-                      src={formCustomImage}
+                      src={formCustomImagePreview}
                       alt="Preview"
-                      referrerPolicy="no-referrer"
-                      className="w-12 h-12 object-cover rounded-xl border border-slate-200 dark:border-slate-700"
+                      className="w-12 h-12 object-contain rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800"
                     />
                   )}
                   <input
                     type="file"
-                    accept="image/*"
+                    accept="image/*,.svg"
                     ref={fileInputRef}
                     onChange={handleImageUpload}
                     className="text-xs text-slate-500 dark:text-slate-400 file:mr-3 file:py-1.5 file:px-3 file:rounded-lg file:border-0 file:text-xs file:font-semibold file:bg-slate-100 dark:file:bg-slate-800 file:text-slate-700 dark:file:text-slate-200"
                   />
                 </div>
+                {photoUploadError && (
+                  <p className="text-xs font-semibold text-rose-600 dark:text-rose-400 mt-1.5">
+                    {photoUploadError}
+                  </p>
+                )}
               </div>
 
               <div className="flex items-center justify-end gap-2.5 pt-3">

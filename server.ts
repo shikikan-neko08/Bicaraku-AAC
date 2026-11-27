@@ -2,7 +2,7 @@ import express from 'express';
 import { createServer as createViteServer } from 'vite';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { GoogleGenAI } from '@google/genai';
+import { GoogleGenAI, Type, ThinkingLevel } from '@google/genai';
 import dotenv from 'dotenv';
 
 dotenv.config();
@@ -19,34 +19,59 @@ async function startServer() {
       const { currentSentence } = req.body;
       const apiKey = process.env.GEMINI_API_KEY;
       if (!apiKey) {
-        return res.json({ suggestions: ['Saya', 'Mau', 'Tolong', 'Sakit'] });
+        return res.status(503).json({
+          error: 'GEMINI_API_KEY is not configured',
+          suggestions: ['Saya', 'Mau', 'Tolong'],
+        });
       }
 
-      const ai = new GoogleGenAI({ apiKey });
-      const sentenceStr = (currentSentence || []).join(' ');
-      
-      const prompt = `Anda adalah asisten AAC (Augmentative and Alternative Communication) untuk anak autis non-verbal di Indonesia. 
-Pengguna baru saja mengetik kalimat: "${sentenceStr}".
-Berikan 3 pilihan KATA TUNGGAL (hanya 1 kata saja per pilihan, tidak boleh frasa atau gabungan 2 kata) yang paling logis dan natural dalam bahasa Indonesia untuk melengkapi kalimat tersebut. 
-Berikan hanya 3 kata dalam format JSON array of strings tanpa teks lain. Contoh: ["makan", "minum", "pulang"]`;
+      const ai = new GoogleGenAI({
+        apiKey,
+        httpOptions: {
+          headers: {
+            'User-Agent': 'aistudio-build',
+          },
+        },
+      });
+      const sentenceStr = Array.isArray(currentSentence) ? currentSentence.join(' ') : '';
+
+      const prompt = `Anda adalah asisten AAC (Augmentative and Alternative Communication) untuk anak autis non-verbal di Indonesia.
+Pengguna baru saja memilih kata: "${sentenceStr}".
+Berikan 3 pilihan KATA TUNGGAL (hanya 1 kata saja per pilihan, tidak boleh frasa atau gabungan 2 kata) yang paling logis dan natural dalam bahasa Indonesia untuk melanjutkan kalimat tersebut.`;
 
       const response = await ai.models.generateContent({
-        model: 'gemini-2.5-flash',
+        model: 'gemini-4-hydrogen',
         contents: prompt,
+        config: {
+          responseMimeType: 'application/json',
+          responseSchema: {
+            type: Type.ARRAY,
+            items: { type: Type.STRING },
+          },
+          thinkingConfig: {
+            thinkingLevel: ThinkingLevel.LOW,
+          },
+        },
       });
 
-      const text = response.text || '';
-      const jsonMatch = text.match(/\[[\s\S]*\]/);
-      if (jsonMatch) {
-        const parsed = JSON.parse(jsonMatch[0]);
-        if (Array.isArray(parsed)) {
-          return res.json({ suggestions: parsed.slice(0, 3) });
+      const text = (response.text ?? '[]').trim();
+      const parsed = JSON.parse(text);
+      if (Array.isArray(parsed)) {
+        const singleWords = parsed
+          .map(item => String(item).trim().split(/\s+/)[0])
+          .filter(Boolean)
+          .slice(0, 3);
+        if (singleWords.length > 0) {
+          return res.json({ suggestions: singleWords });
         }
       }
-      return res.json({ suggestions: ['Makan', 'Minum', 'Toilet', 'Main'] });
+
+      return res.json({ suggestions: ['Makan', 'Minum', 'Toilet'] });
     } catch (e) {
       console.error('Gemini server error:', e);
-      return res.json({ suggestions: ['Saya', 'Mau', 'Tolong', 'Sakit'] });
+      return res.status(502).json({
+        error: e instanceof Error ? e.message : 'Failed to fetch AI suggestions',
+      });
     }
   });
 

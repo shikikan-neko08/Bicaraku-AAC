@@ -171,3 +171,50 @@ export const CATEGORY_LABELS: Record<
     swatch: 'bg-teal-500',
   },
 };
+
+/**
+ * Skema warna Fitzgerald Key sesuai nilai `fitzgeraldColor` dari manifest symbols.json
+ * (`pink`, `green`, `orange`, `blue`, `yellow`, `white`).
+ */
+export const FITZGERALD_COLOR_STYLES: Record<
+  string,
+  { label: string; cardClass: string; swatch: string }
+> = {
+  pink: {
+    label: 'Sosial / Komunikasi',
+    cardClass:
+      'bg-pink-50/75 hover:bg-pink-100/80 text-pink-950 border-pink-400 dark:bg-pink-950/40 dark:hover:bg-pink-950/60 dark:text-pink-100 dark:border-pink-600',
+    swatch: 'bg-pink-500',
+  },
+  green: {
+    label: 'Kata Kerja / Aktivitas',
+    cardClass:
+      'bg-emerald-50/75 hover:bg-emerald-100/80 text-emerald-950 border-emerald-400 dark:bg-emerald-950/40 dark:hover:bg-emerald-950/60 dark:text-emerald-100 dark:border-emerald-600',
+    swatch: 'bg-emerald-500',
+  },
+  orange: {
+    label: 'Benda / Makanan / Tempat',
+    cardClass:
+      'bg-orange-50/75 hover:bg-orange-100/80 text-orange-950 border-orange-400 dark:bg-orange-950/40 dark:hover:bg-orange-950/60 dark:text-orange-100 dark:border-orange-600',
+    swatch: 'bg-orange-500',
+  },
+  blue: {
+    label: 'Sifat / Pertanyaan / Perasaan',
+    cardClass:
+      'bg-sky-50/75 hover:bg-sky-100/80 text-sky-950 border-sky-400 dark:bg-sky-950/40 dark:hover:bg-sky-950/60 dark:text-sky-100 dark:border-sky-600',
+    swatch: 'bg-sky-500',
+  },
+  yellow: {
+    label: 'Orang / Kata Ganti',
+    cardClass:
+      'bg-yellow-50/80 hover:bg-yellow-100/80 text-yellow-950 border-yellow-400 dark:bg-yellow-950/40 dark:hover:bg-yellow-950/60 dark:text-yellow-100 dark:border-yellow-600',
+    swatch: 'bg-yellow-400',
+  },
+  white: {
+    label: 'Kebutuhan / Medis / Netral',
+    cardClass:
+      'bg-white hover:bg-slate-50 text-slate-900 border-slate-300 dark:bg-slate-900 dark:hover:bg-slate-800 dark:text-slate-100 dark:border-slate-600',
+    swatch: 'bg-slate-200 border border-slate-400 dark:bg-slate-400',
+  },
+};
+

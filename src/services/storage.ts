@@ -1,12 +1,10 @@
 import { SymbolItem, AACProfile, UsageLog, AdaptiveSuggestion } from '../types';
-import { DEFAULT_SYMBOLS } from '../data/defaultSymbols';
+import { idbGetAllSymbols, idbPutSymbol } from './indexedDb';
 
 const STORAGE_KEYS = {
-  SYMBOLS: 'bicara_ku_symbols_v1',
   PROFILE: 'bicara_ku_profile_v1',
   LOGS: 'bicara_ku_logs_v1',
   CONSENT: 'bicara_ku_consent_v1',
-  CUSTOM_LAYOUT: 'bicara_ku_custom_layout_v1',
 };
 
 export const DEFAULT_PROFILE: AACProfile = {
@@ -21,29 +19,9 @@ export const DEFAULT_PROFILE: AACProfile = {
   showTextOnly: false,
   imageOnly: false,
   pinCode: '1234',
+  figurePreference: 'all',
+  safeLicenseMode: true,
 };
-
-export function getStoredSymbols(): SymbolItem[] {
-  try {
-    const stored = localStorage.getItem(STORAGE_KEYS.SYMBOLS);
-    if (!stored) {
-      localStorage.setItem(STORAGE_KEYS.SYMBOLS, JSON.stringify(DEFAULT_SYMBOLS));
-      return DEFAULT_SYMBOLS;
-    }
-    return JSON.parse(stored);
-  } catch (e) {
-    console.error('Error loading symbols:', e);
-    return DEFAULT_SYMBOLS;
-  }
-}
-
-export function saveSymbols(symbols: SymbolItem[]): void {
-  try {
-    localStorage.setItem(STORAGE_KEYS.SYMBOLS, JSON.stringify(symbols));
-  } catch (e) {
-    console.error('Error saving symbols:', e);
-  }
-}
 
 export function getStoredProfile(): AACProfile {
   try {
@@ -83,20 +61,24 @@ export function addUsageLog(log: Omit<UsageLog, 'id'>): void {
     const logs = getStoredLogs();
     const newLog: UsageLog = {
       ...log,
-      id: 'log-' + Date.now() + '-' + Math.random().toString(36).substr(2, 4),
+      id: 'log-' + Date.now() + '-' + Math.random().toString(36).slice(2, 6),
     };
-    // Keep last 1000 logs
     const updated = [newLog, ...logs].slice(0, 1000);
     localStorage.setItem(STORAGE_KEYS.LOGS, JSON.stringify(updated));
 
-    // Also update symbol frequency
-    const symbols = getStoredSymbols();
-    const symIndex = symbols.findIndex(s => s.id === log.symbolId);
-    if (symIndex !== -1) {
-      symbols[symIndex].frequency = (symbols[symIndex].frequency || 0) + 1;
-      symbols[symIndex].lastUsed = Date.now();
-      saveSymbols(symbols);
-    }
+    // Perbarui frekuensi simbol di IndexedDB secara asinkron
+    idbGetAllSymbols()
+      .then(symbols => {
+        const target = symbols.find(s => s.id === log.symbolId);
+        if (target) {
+          return idbPutSymbol({
+            ...target,
+            frequency: (target.frequency || 0) + 1,
+            lastUsed: Date.now(),
+          });
+        }
+      })
+      .catch(err => console.error('Error updating symbol frequency in IndexedDB:', err));
   } catch (e) {
     console.error('Error adding usage log:', e);
   }
@@ -118,15 +100,13 @@ export function setStoredConsent(consent: boolean): void {
   }
 }
 
-export function generateAdaptiveSuggestions(): AdaptiveSuggestion[] {
+export function generateAdaptiveSuggestions(symbols: SymbolItem[] = []): AdaptiveSuggestion[] {
   const logs = getStoredLogs();
-  const symbols = getStoredSymbols();
-  if (logs.length < 3) return [];
+  if (logs.length < 3 || symbols.length === 0) return [];
 
   const hour = new Date().getHours();
   const timeOfDay = hour < 11 ? 'pagi' : hour < 15 ? 'siang' : hour < 18 ? 'sore' : 'malam';
 
-  // Count usage per symbol in current time of day
   const counts: Record<string, number> = {};
   logs.forEach(log => {
     if (log.timeOfDay === timeOfDay) {

@@ -1,4 +1,4 @@
-export type FitzgeraldCategory = 
+export type FitzgeraldCategory =
   | 'people'      /* Orang (Pink/Magenta) */
   | 'verbs'       /* Kata Kerja (Green) */
   | 'nouns'       /* Benda (Orange/Yellow) */
@@ -10,16 +10,63 @@ export type FitzgeraldCategory =
   | 'activities'  /* Aktivitas (Cyan) */
   | 'emergency';  /* Darurat (Red bold) */
 
+export type SymbolDownloadStatus = 'pending' | 'done' | 'failed' | 'placeholder';
+
+export type FigurePreference = 'all' | 'female' | 'male';
+
+export interface ManifestEntry {
+  id?: string;
+  filename: string | null;
+  image?: string | null;
+  label: string;
+  speechText: string;
+  category?: string;
+  fitzgeraldColor?: string;
+  tagsEn?: string | string[];
+  source?: string;
+  license?: string | null;
+  author?: string | null;
+  commercialOk?: boolean;
+  attributionRequired?: boolean;
+  variantGroup?: string | null;
+  isDefault?: boolean;
+  variantNote?: string;
+  notes?: string;
+  placeholderNote?: string | null;
+}
+
 export interface SymbolItem {
   id: string;
+  filename?: string | null;
   label: string;
-  spokenText?: string; // What TTS says if different from label
+  spokenText?: string; // Single source of truth for speech (synced with speechText)
+  speechText?: string; // Alias from manifest
   category: FitzgeraldCategory;
-  iconName: string; // Lucide icon name or emoji or image URL
-  customImageUrl?: string; // Base64 or URL uploaded by caregiver
+  boardCategory?: string; // Nama folder kategori persis dari manifest (mis. "Sosial & Komunikasi")
+  fitzgeraldColor?: string; // Warna Fitzgerald dari manifest (pink, green, orange, blue, yellow, white)
+  iconName: string; // Fallback Lucide icon name (tanpa emoji)
+  customImageUrl?: string; // Legacy data URL saat impor cadangan lama (dipindah ke IndexedDB Blob)
+  hasImageBlob?: boolean; // True when image Blob is saved in IndexedDB
   customAudioUrl?: string; // Base64 recorded audio
   isEmergency?: boolean;
   isCustom?: boolean;
+  isPlaceholder?: boolean;
+  userModified?: boolean; // True when edited by caregiver — never auto-overwritten
+  downloadStatus?: SymbolDownloadStatus;
+  downloadError?: string;
+  contentHash?: string;
+  // Manifest & License metadata
+  tagsEn?: string[];
+  source?: string;
+  license?: string;
+  author?: string;
+  commercialOk?: boolean;
+  attributionRequired?: boolean;
+  variantGroup?: string | null;
+  isDefault?: boolean;
+  variantNote?: string;
+  notes?: string;
+  placeholderNote?: string;
   frequency?: number;
   lastUsed?: number;
 }
@@ -40,6 +87,8 @@ export interface AACProfile {
   showTextOnly: boolean; // false = image + text, true = text only
   imageOnly: boolean; // false = image + text, true = image only
   pinCode: string; // Default '1234'
+  figurePreference: FigurePreference; // Preferensi figur: all / female / male
+  safeLicenseMode: boolean; // Mode Lisensi Aman
 }
 
 export interface UsageLog {
@@ -67,4 +116,65 @@ export interface AdaptiveSuggestion {
   suggestedLocation: LocationContextType;
   suggestedTime: string;
   score: number;
+}
+
+export interface SyncErrorItem {
+  id: string;
+  label: string;
+  filename: string | null;
+  attemptedUrl?: string;
+  reason: string;
+  timestamp?: number;
+}
+
+export interface SyncSummary {
+  total: number;
+  succeeded: number;
+  mulberrySucceeded?: number;
+  customSucceeded?: number;
+  failed: number;
+  placeholders: number;
+  errors: SyncErrorItem[];
+  usedMirror: boolean;
+  finishedAt: number;
+}
+
+export type SyncStatusState = 'idle' | 'running' | 'completed' | 'failed';
+
+export interface SyncDiagnostics {
+  manifestUrl: string;
+  status: SyncStatusState;
+  succeeded: number;
+  failed: number;
+  placeholders: number;
+  errors: SyncErrorItem[];
+  usedMirror: boolean;
+  lastErrorMessage?: string;
+  updatedAt: number;
+}
+
+export interface ManifestMeta {
+  version: string;
+  bundledSymbolsVersion?: string;
+  hash: string;
+  downloadedAt: number;
+  completedInit: boolean;
+  offlineTextFallback?: boolean;
+  lastSummary?: SyncSummary;
+}
+
+export interface LicenseDocs {
+  licenseMulberryText: string;
+  creditsMdText: string;
+  fetchedAt: number;
+}
+
+export interface SymbolUpdateDiffItem {
+  id: string;
+  label: string;
+  type: 'added' | 'changed' | 'removed';
+  incoming?: SymbolItem;
+  existing?: SymbolItem;
+  userModified: boolean;
+  resolution: 'keep_mine' | 'use_new';
 }

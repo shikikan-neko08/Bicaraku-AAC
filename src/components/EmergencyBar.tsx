@@ -4,10 +4,16 @@ import { DEFAULT_SYMBOLS } from '../data/defaultSymbols';
 import { AlertCircle, HelpCircle, CheckCircle2, VolumeX, Hand, Home } from 'lucide-react';
 
 interface EmergencyBarProps {
+  symbols: SymbolItem[];
+  blobUrls: Record<string, string>;
   onSelectEmergency: (symbol: SymbolItem) => void;
 }
 
-export const EmergencyBar: React.FC<EmergencyBarProps> = ({ onSelectEmergency }) => {
+export const EmergencyBar: React.FC<EmergencyBarProps> = ({
+  symbols,
+  blobUrls,
+  onSelectEmergency,
+}) => {
   const emergencySymbols = DEFAULT_SYMBOLS.filter(s => s.isEmergency);
 
   const iconMap: Record<string, React.ElementType> = {
@@ -17,6 +23,16 @@ export const EmergencyBar: React.FC<EmergencyBarProps> = ({ onSelectEmergency })
     VolumeX,
     Hand,
     Home,
+  };
+
+  const findMatchingBlobUrl = (emergencyLabel: string): string | undefined => {
+    const target = emergencyLabel.trim().toLowerCase();
+    const candidates = symbols.filter(
+      s => s.label.trim().toLowerCase() === target && !!blobUrls[s.id]
+    );
+    if (candidates.length === 0) return undefined;
+    const preferred = candidates.find(s => s.isDefault !== false) || candidates[0];
+    return blobUrls[preferred.id];
   };
 
   return (
@@ -33,14 +49,24 @@ export const EmergencyBar: React.FC<EmergencyBarProps> = ({ onSelectEmergency })
         <div className="flex items-center gap-2">
           {emergencySymbols.map(sym => {
             const Icon = iconMap[sym.iconName] || AlertCircle;
+            const matchedImageUrl = findMatchingBlobUrl(sym.label);
+
             return (
               <button
                 key={sym.id}
                 onClick={() => onSelectEmergency(sym)}
-                className="px-4 py-2 bg-rose-700 hover:bg-rose-800 active:scale-[0.97] text-white font-bold rounded-xl shadow-sm flex items-center gap-2 shrink-0 text-sm whitespace-nowrap border border-rose-800 dark:border-rose-600 transition-all min-h-[46px]"
+                className="px-3.5 py-2 bg-rose-700 hover:bg-rose-800 active:scale-[0.97] text-white font-bold rounded-xl shadow-sm flex items-center gap-2 shrink-0 text-sm whitespace-nowrap border border-rose-800 dark:border-rose-600 transition-all min-h-[46px]"
                 style={{ touchAction: 'manipulation' }}
               >
-                <Icon className="w-4 h-4 shrink-0" />
+                {matchedImageUrl ? (
+                  <img
+                    src={matchedImageUrl}
+                    alt={sym.label}
+                    className="w-6 h-6 object-contain rounded bg-white/95 p-0.5 shrink-0"
+                  />
+                ) : (
+                  <Icon className="w-4 h-4 shrink-0" />
+                )}
                 <span>{sym.label}</span>
               </button>
             );
